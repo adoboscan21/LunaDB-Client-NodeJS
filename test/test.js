@@ -1,344 +1,267 @@
+/* ==========================================================
+   Path and File: ./test.js
+   Description: Complete Test Suite for LunaDB Client (with Timing)
+   ========================================================== */
+
+import { LunaDBClient } from "../lunadb-client.js";
 import assert from "node:assert";
-import { randomUUID } from "node:crypto";
-import MemoryToolsClient from "../memory-tools-client.js";
+import { performance } from "node:perf_hooks";
 
-// --- Test Environment Configuration ---
-// Modify these variables if your server runs in another location or with different credentials
-const HOST = "localhost";
-const PORT = 5876;
-const USERNAME = "admin"; // A user with write permissions on '*'
-const PASSWORD = "adminpass";
-const SERVER_CERT_PATH = undefined; // Path to the server's certificate or undefined
-const REJECT_UNAUTHORIZED = false;
-
-// --- Helper Functions for Printing ---
-
-function printHeader(title) {
-  console.log("\n" + "=".repeat(60));
-  console.log(`--- ${title.toUpperCase()} ---`);
-  console.log("=".repeat(60));
-}
-
-function printStep(step, description) {
-  console.log(`\n${step}. ${description}...`);
-}
-
-/**
- * A helper to wrap test promises, printing success or failure.
- * In Node.js, the client throws an error on failure, which is caught here.
- */
-async function checkResult(description, promiseFn) {
+// ---------------------------------------------------------
+// HELPERS FOR VALIDATION AND VISUALIZATION
+// ---------------------------------------------------------
+async function runTest(testName, testFn) {
+  process.stdout.write(`⏳ Testing: ${testName.padEnd(50, ".")} `);
   try {
-    const result = await promiseFn();
-    console.log(`   [SUCCESS]   ${description}`);
-    if (result !== undefined && result !== null) {
-      // Pretty-print if it looks like an object/array
-      if (typeof result === "object") {
-        console.log(`   [DATA]      ${JSON.stringify(result, null, 2)}`);
-      } else {
-        console.log(`   [DATA]      ${result}`);
-      }
-    }
-    return result;
-  } catch (error) {
-    console.error(`   [FAILURE]   ${description}`);
-    console.error(`   [ERROR]     ${error.message}`);
-    // Exit the process on critical failure to avoid cascading errors
-    process.exit(1);
+    const start = performance.now();
+    await testFn();
+    const end = performance.now();
+    const duration = (end - start).toFixed(2);
+    console.log(`✅ OK (${duration}ms)`);
+  } catch (err) {
+    console.log("❌ FAILED");
+    console.error(`\nError details in [${testName}]:`);
+    console.error(err);
+    process.exit(1); // Stop everything if a core test fails
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
+// ==========================================
+// TEST EXECUTION
+// ==========================================
 async function main() {
-  const client = new MemoryToolsClient(
-    HOST,
-    PORT,
-    USERNAME,
-    PASSWORD,
-    SERVER_CERT_PATH,
-    REJECT_UNAUTHORIZED
-  );
+  console.log("\n=======================================================");
+  console.log(" 🧪 STARTING COMPLETE TEST SUITE: LunaDB Client 🧪 ");
+  console.log("=======================================================\n");
 
-  try {
+  const client = new LunaDBClient("localhost", 5876, "admin", "adminpass", null, false);
+  const runId = Date.now();
+  const testCol = `test_collection_${runId}`;
+  const joinCol = `test_join_${runId}`;
+
+  // ---------------------------------------------------------
+  // PHASE 1: Connection and Authentication
+  // ---------------------------------------------------------
+  await runTest("1. TLS Connection and Authentication", async () => {
     await client.connect();
-    if (!client.isAuthenticatedSession) {
-      console.error(
-        "[FAILURE] Initial client authentication failed. Aborting tests."
-      );
-      return;
-    }
+    assert.strictEqual(client.isAuthenticatedSession, true, "Client should be authenticated");
+    assert.strictEqual(client.authenticatedUser, "admin", "User should be 'admin'");
+  });
 
-    // --- Collections and Indexes Test ---
-    await runCollectionAndIndexTests(client);
+  // ---------------------------------------------------------
+  // PHASE 2: Collection Management
+  // ---------------------------------------------------------
+  await runTest("2. Create Collections", async () => {
+    await client.collectionCreate(testCol);
+    await client.collectionCreate(joinCol);
+  });
 
-    // --- CRUD Operations Test ---
-    await runCrudTests(client);
+  await runTest("3. List Collections", async () => {
+    const list = await client.collectionList();
+    assert.ok(Array.isArray(list), "The collection list must be an array");
+    assert.ok(list.includes(testCol), `The list must include ${testCol}`);
+  });
 
-    // --- Bulk Operations Test ---
-    await runBulkTests(client);
+  // ---------------------------------------------------------
+  // PHASE 3: Index Management
+  // ---------------------------------------------------------
+  await runTest("4. Create Indexes", async () => {
+    await client.collectionIndexCreate(testCol, "username");
+    await client.collectionIndexCreate(testCol, "age");
+  });
 
-    // --- Transactions Test ---
-    await runTransactionTests(client);
+  await runTest("5. List Indexes", async () => {
+    const indexes = await client.collectionIndexList(testCol);
+    assert.ok(indexes.includes("username"), "The 'username' index must exist");
+    assert.ok(indexes.includes("age"), "The 'age' index must exist");
+    assert.ok(indexes.includes("_id"), "The default '_id' index must exist");
+  });
 
-    // --- Complex Queries Test ---
-    await runQueryTests(client);
-  } catch (e) {
-    console.error(`\n\nAn unexpected error occurred during tests: ${e.message}`);
-  } finally {
-    client.close();
-    console.log("\nConnection closed.");
-  }
-}
+  await runTest("6. Delete Indexes", async () => {
+    await client.collectionIndexDelete(testCol, "username");
+    const indexes = await client.collectionIndexList(testCol);
+    assert.ok(!indexes.includes("username"), "The 'username' index should have been deleted");
+  });
 
-async function runCollectionAndIndexTests(client) {
-  printHeader("Collection and Index Management Tests");
-  const collName = `test_coll_${randomUUID().slice(0, 8)}`;
+  // ---------------------------------------------------------
+  // PHASE 4: Item CRUD (Single)
+  // ---------------------------------------------------------
+  let autoGeneratedId = "";
 
-  try {
-    await checkResult("Creating collection", () =>
-      client.collectionCreate(collName)
-    );
+  await runTest("7. Insert an Item (Set) with and without Key", async () => {
+    // With explicit Key
+    await client.collectionItemSet(testCol, { name: "Juan", age: 30 }, "user_1");
+    
+    // Without Key (Auto-generated by the server)
+    const res = await client.collectionItemSet(testCol, { name: "Pedro", age: 25 });
+    assert.ok(res._id, "The server should have returned an auto-generated _id");
+    autoGeneratedId = res._id;
+  });
 
-    printStep(2, "Listing collections to verify creation");
-    const collections = await client.collectionList();
-    if (collections.includes(collName)) {
-      console.log(`   [SUCCESS]   Collection '${collName}' was found in the list.`);
-    } else {
-      console.error(`   [FAILURE]   Collection '${collName}' was NOT found.`);
-    }
+  await runTest("8. Read an Item (Get)", async () => {
+    const res = await client.collectionItemGet(testCol, "user_1");
+    assert.strictEqual(res.found, true);
+    assert.strictEqual(res.value.name, "Juan");
+    assert.strictEqual(res.value.age, 30);
+  });
 
-    await checkResult("Creating an index on the 'city' field", () =>
-      client.collectionIndexCreate(collName, "city")
-    );
+  await runTest("9. Update an Item (Update)", async () => {
+    await client.collectionItemUpdate(testCol, "user_1", { age: 31, city: "Madrid" });
+    const res = await client.collectionItemGet(testCol, "user_1");
+    assert.strictEqual(res.value.age, 31, "The age should have changed");
+    assert.strictEqual(res.value.city, "Madrid", "The new field should have been added");
+    assert.strictEqual(res.value.name, "Juan", "The original name should not have been deleted");
+  });
 
-    printStep(4, "Listing indexes to verify creation");
-    const indexes = await client.collectionIndexList(collName);
-    if (indexes.includes("city")) {
-      console.log("   [SUCCESS]   The 'city' index was found.");
-    } else {
-      console.error("   [FAILURE]   The 'city' index was NOT found.");
-    }
+  await runTest("10. Delete an Item (Delete)", async () => {
+    await client.collectionItemDelete(testCol, autoGeneratedId);
+    const res = await client.collectionItemGet(testCol, autoGeneratedId);
+    assert.strictEqual(res.found, false, "The auto-generated item should have been deleted");
+  });
 
-    await checkResult("Deleting the 'city' index", () =>
-      client.collectionIndexDelete(collName, "city")
-    );
-
-    printStep(6, "Listing indexes to verify deletion");
-    const indexesAfterDelete = await client.collectionIndexList(collName);
-    if (!indexesAfterDelete.includes("city")) {
-      console.log("   [SUCCESS]   The 'city' index no longer exists.");
-    } else {
-      console.error("   [FAILURE]   The 'city' index still exists.");
-    }
-  } finally {
-    printStep(7, `Cleanup: deleting collection '${collName}'`);
-    await client.collectionDelete(collName);
-  }
-}
-
-async function runCrudTests(client) {
-  printHeader("CRUD Operations Tests (Create, Read, Update, Delete)");
-  const collName = `crud_coll_${randomUUID().slice(0, 8)}`;
-  const itemKey = "user-001";
-
-  try {
-    await client.collectionCreate(collName);
-
-    await checkResult("SET (Create) an item", () =>
-      client.collectionItemSet(collName, { name: "Luisa", age: 40 }, itemKey)
-    );
-
-    printStep(2, "GET (Read) the item");
-    const getResp = await client.collectionItemGet(collName, itemKey);
-    assert(getResp.found, "Item should be found");
-    assert.strictEqual(getResp.value.name, "Luisa");
-    console.log("   [SUCCESS]   Item was retrieved correctly.");
-
-    await checkResult("UPDATE the item", () =>
-      client.collectionItemUpdate(collName, itemKey, {
-        age: 41,
-        status: "active",
-      })
-    );
-
-    printStep(4, "GET (Read) to verify the update");
-    const getUpdatedResp = await client.collectionItemGet(collName, itemKey);
-    assert(getUpdatedResp.found, "Updated item should be found");
-    assert.strictEqual(getUpdatedResp.value.age, 41);
-    console.log("   [SUCCESS]   Item was updated correctly.");
-
-    await checkResult("DELETE the item", () =>
-      client.collectionItemDelete(collName, itemKey)
-    );
-
-    printStep(6, "GET (Read) to verify the deletion");
-    const getDeletedResp = await client.collectionItemGet(collName, itemKey);
-    if (!getDeletedResp.found) {
-      console.log(`   [SUCCESS]   Item '${itemKey}' was not found, as expected.`);
-    } else {
-      console.error(`   [FAILURE]   Item '${itemKey}' still exists.`);
-    }
-  } finally {
-    await client.collectionDelete(collName);
-  }
-}
-
-async function runBulkTests(client) {
-  printHeader("Bulk Operations Tests (set_many, delete_many)");
-  const collName = `bulk_coll_${randomUUID().slice(0, 8)}`;
-
-  try {
-    await client.collectionCreate(collName);
-
-    const itemsToSet = Array.from({ length: 5 }, (_, i) => ({
-      _id: `item-${i}`,
-      val: i * 10,
-    }));
-    const keysToDelete = ["item-1", "item-3"];
-
-    await checkResult("SET MANY: Inserting 5 items", () =>
-      client.collectionItemSetMany(collName, itemsToSet)
-    );
-
-    await checkResult("DELETE MANY: Deleting 2 out of 5 items", () =>
-      client.collectionItemDeleteMany(collName, keysToDelete)
-    );
-
-    await sleep(100); // Give the server time to stabilize state
-
-    printStep(3, "Verifying the final state");
-    const finalItems = await client.collectionQuery(collName, {});
-    const finalKeys = new Set(finalItems.map((item) => item._id));
-    const expectedKeys = new Set(["item-0", "item-2", "item-4"]);
-
-    try {
-      assert.deepStrictEqual(finalKeys, expectedKeys);
-      console.log("   [SUCCESS]   The collection's state is as expected.");
-    } catch (e) {
-      console.error("   [FAILURE]   The final state is not correct.");
-      console.error(`             - Expected: ${[...expectedKeys].join(", ")}`);
-      console.error(`             - Found:    ${[...finalKeys].join(", ")}`);
-    }
-  } finally {
-    await client.collectionDelete(collName);
-  }
-}
-
-async function runTransactionTests(client) {
-  printHeader("Transaction Tests (Commit and Rollback)");
-  const collName = `tx_coll_${randomUUID().slice(0, 8)}`;
-  const keyCommit = "committed-key";
-  const keyRollback = "rolled-back-key";
-
-  try {
-    await client.collectionCreate(collName);
-
-    printStep(1, "Testing a successful COMMIT");
-    await client.begin();
-    await client.collectionItemSet(collName, { tx_status: "final" }, keyCommit);
-    await client.commit();
-    const getCommitted = await client.collectionItemGet(collName, keyCommit);
-    if (getCommitted.found) {
-      console.log(
-        "   [SUCCESS]   The item written in the transaction was found after commit."
-      );
-    } else {
-      console.error("   [FAILURE]   The item was not found after commit.");
-    }
-
-    printStep(2, "Testing a ROLLBACK");
-    await client.begin();
-    await client.collectionItemSet(
-      collName,
-      { tx_status: "temporary" },
-      keyRollback
-    );
-    await client.rollback();
-    const getRolledBack = await client.collectionItemGet(collName, keyRollback);
-    if (!getRolledBack.found) {
-      console.log(
-        "   [SUCCESS]   The item written in the transaction was not found after rollback, as expected."
-      );
-    } else {
-      console.error(
-        "   [FAILURE]   An item that should have been rolled back was found."
-      );
-    }
-  } finally {
-    await client.collectionDelete(collName);
-  }
-}
-
-async function runQueryTests(client) {
-  printHeader("Query Tests (Filter, Projection, Lookup)");
-  const usersColl = `users_${randomUUID().slice(0, 8)}`;
-  const profilesColl = `profiles_${randomUUID().slice(0, 8)}`;
-
-  try {
-    await client.collectionCreate(usersColl);
-    await client.collectionCreate(profilesColl);
-
-    const users = [
-      { _id: "u1", name: "Elena", age: 34, active: true },
-      { _id: "u2", name: "Marcos", age: 25, active: true },
-      { _id: "u3", name: "Sofia", age: 45, active: false },
+  // ---------------------------------------------------------
+  // PHASE 5: Item CRUD (Batch / Mass)
+  // ---------------------------------------------------------
+  await runTest("11. Insert Multiple Items (Set Many)", async () => {
+    const items = [
+      { _id: "user_10", name: "Ana", age: 28, role: "admin" },
+      { _id: "user_11", name: "Luis", age: 35, role: "user" },
+      { _id: "user_12", name: "Maria", age: 22, role: "user" }
     ];
-    const profiles = [
-      { _id: "p1", user_id: "u1", city: "Madrid" },
-      { _id: "p2", user_id: "u2", city: "Bogota" },
+    await client.collectionItemSetMany(testCol, items);
+  });
+
+  await runTest("12. Update Multiple Items (Update Many)", async () => {
+    const patches = [
+      { _id: "user_10", patch: { role: "superadmin" } },
+      { _id: "user_12", patch: { age: 23 } }
     ];
-    await client.collectionItemSetMany(usersColl, users);
-    await client.collectionItemSetMany(profilesColl, profiles);
-    await sleep(100); // Give the server time to process writes
+    await client.collectionItemUpdateMany(testCol, patches);
+    
+    const ana = await client.collectionItemGet(testCol, "user_10");
+    const maria = await client.collectionItemGet(testCol, "user_12");
+    assert.strictEqual(ana.value.role, "superadmin");
+    assert.strictEqual(maria.value.age, 23);
+  });
 
-    printStep(1, "Query with Filter: active users with age > 30");
-    const qFilter = {
-      filter: {
-        and: [
-          { field: "active", op: "=", value: true },
-          { field: "age", op: ">", value: 30 },
-        ],
-      },
-    };
-    const result1 = await checkResult("Executing filter query", () =>
-      client.collectionQuery(usersColl, qFilter)
-    );
-    assert.strictEqual(result1.length, 1);
-    assert.strictEqual(result1[0].name, "Elena");
+  await runTest("13. Delete Multiple Items (Delete Many)", async () => {
+    await client.collectionItemDeleteMany(testCol, ["user_10", "user_11"]);
+    const res10 = await client.collectionItemGet(testCol, "user_10");
+    const res11 = await client.collectionItemGet(testCol, "user_11");
+    assert.strictEqual(res10.found, false);
+    assert.strictEqual(res11.found, false);
+  });
 
-    printStep(2, "Query with Projection: get only name and age");
-    const qProj = { projection: ["name", "age"] };
-    const result2 = await checkResult("Executing projection query", () =>
-      client.collectionQuery(usersColl, qProj)
-    );
-    assert(result2.every((user) => !("active" in user)));
-    assert(result2.every((user) => "name" in user && "age" in user));
+  // ---------------------------------------------------------
+  // PHASE 6: Query Engine
+  // ---------------------------------------------------------
+  await runTest("14. Queries (Filters, Limit, OrderBy)", async () => {
+    // Populate data for the test
+    await client.collectionItemSetMany(testCol, [
+      { _id: "q1", v: 10, cat: "A" }, { _id: "q2", v: 50, cat: "A" },
+      { _id: "q3", v: 30, cat: "B" }, { _id: "q4", v: 40, cat: "A" }
+    ]);
 
-    printStep(3, "Query with Lookup (JOIN): join profiles with users");
-    const qLookup = {
-      lookups: [
-        {
-          from: usersColl,
-          localField: "user_id",
-          foreignField: "_id",
-          as: "user_info",
-        },
-      ],
-    };
-    const result3 = await checkResult("Executing lookup query", () =>
-      client.collectionQuery(profilesColl, qLookup)
-    );
-    const profile1 = result3.find((p) => p._id === "p1");
-    assert(profile1, "Profile p1 should exist");
-    assert.strictEqual(profile1.user_info.name, "Elena");
-  } finally {
-    await client.collectionDelete(usersColl);
-    await client.collectionDelete(profilesColl);
-  }
+    const results = await client.collectionQuery(testCol, {
+      filter: { field: "cat", op: "=", value: "A" },
+      order_by: [{ field: "v", direction: "desc" }],
+      limit: 2
+    });
+
+    assert.strictEqual(results.length, 2);
+    assert.strictEqual(results[0].v, 50);
+    assert.strictEqual(results[1].v, 40);
+  });
+
+  await runTest("15. Queries (Aggregations and Group By)", async () => {
+    const results = await client.collectionQuery(testCol, {
+      group_by: ["cat"],
+      aggregations: { 
+        total_v: { func: "sum", field: "v" },
+        count_docs: { func: "count", field: "*" } 
+      }
+    });
+
+    const catA = results.find(r => r.cat === "A");
+    assert.ok(catA, "Group A must exist");
+    assert.strictEqual(catA.total_v, 100); // 10 + 50 + 40
+    assert.strictEqual(catA.count_docs, 3);
+  });
+
+  await runTest("16. Queries (Lookups / Joins)", async () => {
+    await client.collectionItemSet(joinCol, { desc: "Category A Details" }, "A");
+    const results = await client.collectionQuery(testCol, {
+      filter: { field: "_id", op: "=", value: "q1" },
+      lookups: [{ from: joinCol, localField: "cat", foreignField: "_id", as: "join_data" }]
+    });
+
+    assert.strictEqual(results[0].join_data.desc, "Category A Details", "The cross join should work");
+  });
+
+  // ---------------------------------------------------------
+  // PHASE 7: ACID Transactions (Stateful)
+  // ---------------------------------------------------------
+  await runTest("17. Transactions: Commit", async () => {
+    // 1. Prepare the ground: create an item outside the transaction
+    await client.collectionItemSet(testCol, { state: "initial" }, "tx_1");
+
+    // 2. Start the transaction
+    const tx = await client.begin();
+    
+    // 3. Modify the existing item and create a new one
+    await tx.collectionItemUpdate(testCol, "tx_1", { state: "tx_done" });
+    await tx.collectionItemSet(testCol, { state: "new" }, "tx_new");
+
+    // 4. Verify isolation: the changes should NOT be applied YET
+    const resBefore = await client.collectionItemGet(testCol, "tx_1");
+    assert.strictEqual(resBefore.value.state, "initial", "State should not have changed before commit");
+
+    // 5. Commit the transaction
+    await tx.commit();
+
+    // 6. Verify that NOW they are applied to the disk
+    const resAfterUpdate = await client.collectionItemGet(testCol, "tx_1");
+    assert.strictEqual(resAfterUpdate.value.state, "tx_done", "State should have changed after commit");
+
+    const resAfterNew = await client.collectionItemGet(testCol, "tx_new");
+    assert.strictEqual(resAfterNew.found, true, "The new item should have been saved after commit");
+  });
+
+  await runTest("18. Transactions: Rollback", async () => {
+    const tx = await client.begin();
+    
+    // Attempt to delete the existing record and create a new one
+    await tx.collectionItemDelete(testCol, "tx_1"); 
+    await tx.collectionItemSet(testCol, { state: "should_not_exist" }, "tx_2");
+    
+    // Cancel the transaction
+    await tx.rollback();
+
+    // Verify that the changes were NOT applied to the disk
+    const res2 = await client.collectionItemGet(testCol, "tx_2");
+    assert.strictEqual(res2.found, false, "The Set inside the cancelled tx should not have been saved");
+
+    const res1 = await client.collectionItemGet(testCol, "tx_1");
+    assert.strictEqual(res1.found, true, "The Delete inside the cancelled tx should not have been applied");
+  });
+
+  // ---------------------------------------------------------
+  // PHASE 8: Cleanup and Close
+  // ---------------------------------------------------------
+  await runTest("19. Delete Collections (Drop)", async () => {
+    await client.collectionDelete(testCol);
+    await client.collectionDelete(joinCol);
+    
+    const list = await client.collectionList();
+    assert.ok(!list.includes(testCol), "The test collection should have been deleted");
+  });
+
+  console.log("\n=======================================================");
+  console.log(" 🎉 ALL TESTS PASSED SUCCESSFULLY! 🎉 ");
+  console.log(" The LunaDB Node.js client is 100% functional.");
+  console.log("=======================================================\n");
+
+  client.close();
 }
 
-console.log("Starting test suite for MemoryToolsClient...");
-main().catch((err) => {
-  console.error("\nA critical error stopped the test suite:", err);
-});
+main();

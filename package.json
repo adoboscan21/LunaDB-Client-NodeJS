@@ -1,34 +1,47 @@
 {
-  "name": "memory-tools-client",
-  "version": "1.0.18",
-  "description": "Memory-Tools client Nodejs library.",
-  "main": "memory-tools-client.js",
+  "name": "lunadb-client",
+  "version": "0.0.1",
+  "description": "Official Node.js client library for LunaDB - A high-performance, disk-first document and key-value database.",
+  "main": "dist/lunadb-client.js",
+  "types": "lunadb-client.d.ts",
+  "type": "module",
   "scripts": {
-    "test": "node ./test/test.js"
+    "build": "tsc",
+    "test": "node ./dist/test.js",
+    "benchmark": "node ./dist/vs.js",
+    "prepublishOnly": "npm run build"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adoboscan21/Memory-Tools-Client-Node.git"
+    "url": "git+https://github.com/adoboscan21/lunadb-client-NodeJS.git"
   },
-  "types": "memory-tools-client.d.ts",
   "keywords": [
-    "memory-tools",
+    "lunadb",
     "database",
     "client",
+    "driver",
     "nodejs",
-    "tls"
+    "tls",
+    "bson",
+    "nosql"
   ],
-  "author": "",
+  "author": "Adonay Boscán <adoboscan21@gmail.com>",
   "license": "MIT",
-  "type": "module",
   "bugs": {
-    "url": "https://github.com/adoboscan21/Memory-Tools-Client-Node/issues"
+    "url": "https://github.com/adoboscan21/lunadb-client-NodeJS/issues"
   },
-  "homepage": "https://github.com/adoboscan21/Memory-Tools-Client-Node#readme",
-  "devDependencies": {
-    "@types/node": "^24.1.0"
-  },
+  "homepage": "https://github.com/adoboscan21/lunadb-client-NodeJS#readme",
+  "files": [
+    "dist/lunadb-client.js",
+    "lunadb-client.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
-    "typescript": "^5.8.3"
+    "bson": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,18 +1,26 @@
-# Memory Tools Node.js Client
+# LunaDB Node.js Client 🐈
 
-An asynchronous Node.js client for interacting with the **Memory Tools** database via its secure, TLS-based binary protocol. This library is designed to be efficient, robust, and easy to use.
+An asynchronous, connection-pooled Node.js client for interacting with the **LunaDB** database via its secure, TLS-based BSON binary protocol. This library is designed to be highly concurrent, robust, and ergonomically friendly for TypeScript and JavaScript developers.
 
 ---
 
 ## 📖 Getting Started
 
+### Installation
+
+```bash
+npm install lunadb-client bson
+````
+
+_(Note: `bson` is a required peer dependency as LunaDB communicates using native binary BSON for maximum performance)._
+
 ### Connection and Basic Operations
 
-The `MemoryToolsClient` class allows you to connect to your server. It's recommended to provide credentials for authentication. The client manages a persistent connection that should be closed when your application finishes.
+The `LunaDBClient` class automatically manages a **Connection Pool** (default: 100 sockets) under the hood to handle massive concurrency without blocking the Node.js event loop.
+
 
 ```javascript
-// For ESM: import MemoryToolsClient from "memory-tools-client";
-const { MemoryToolsClient } = require("memory-tools-client");
+import { LunaDBClient } from "lunadb-client";
 
 // Server Configuration
 const DB_HOST = "127.0.0.1";
@@ -20,33 +28,35 @@ const DB_PORT = 5876;
 const DB_USER = "admin";
 const DB_PASS = "adminpass";
 
-// For production, set rejectUnauthorized to 'true' and provide a serverCertPath.
-const client = new MemoryToolsClient(
+// Initialize the client
+// Parameters: host, port, user, pass, certPath, rejectUnauthorized, poolSize
+const client = new LunaDBClient(
   DB_HOST,
   DB_PORT,
   DB_USER,
   DB_PASS,
-  null, // serverCertPath
-  false // rejectUnauthorized
+  null,  // serverCertPath (Provide your CA cert in production)
+  false, // rejectUnauthorized (Set to true in production)
+  100    // poolSize (Number of concurrent TLS sockets)
 );
 
 async function runExample() {
   try {
+    // 1. Establish the connection pool
     await client.connect();
-    console.log(`Connected and authenticated as: ${client.authenticatedUser}`);
+    console.log(`✔ Connected and authenticated as: ${client.authenticatedUser}`);
 
     const collName = "users";
     await client.collectionCreate(collName);
     console.log(`✔ Collection '${collName}' created.`);
 
-    // Set an item with an auto-generated UUID key
+    // 2. Set an item (Auto-generates UUID if key is omitted)
     const userValue = { name: "Elena", city: "Madrid", active: true };
-    await client.collectionItemSet(collName, userValue);
-    // The '_id' is automatically added to the userValue object
-    console.log(`✔ User '${userValue._id}' set successfully.`);
+    const savedUser = await client.collectionItemSet(collName, userValue);
+    console.log(`✔ User set successfully with ID: ${savedUser._id}`);
 
-    // Set an item with a specific key
-    const specificKey = "user:marcos";
+    // 3. Set an item with a specific explicit key
+    const specificKey = "user_marcos";
     await client.collectionItemSet(
       collName,
       { name: "Marcos", city: "Bogota", active: true },
@@ -54,7 +64,7 @@ async function runExample() {
     );
     console.log(`✔ User '${specificKey}' set successfully.`);
 
-    // Get an item back
+    // 4. Retrieve the item back
     const result = await client.collectionItemGet(collName, specificKey);
     if (result.found) {
       console.log("✔ Item retrieved:", result.value);
@@ -62,37 +72,38 @@ async function runExample() {
   } catch (error) {
     console.error("✖ Connection or operation error:", error.message);
   } finally {
-    // Ensure the connection is always closed
+    // Always close the pool when the application shuts down
     client.close();
-    console.log("Connection closed.");
+    console.log("Connection pool closed.");
   }
 }
 
 runExample();
 ```
 
-### Atomic Transactions
+### Stateful ACID Transactions
 
-For operations that must either all succeed or all fail, you can use transactions.
+For operations that must either all succeed or all fail, LunaDB supports strict ACID transactions. Calling `begin()` locks a dedicated connection from the pool for your transaction block.
+
 
 ```javascript
 async function transactionExample() {
   await client.connect();
-  // ... create a collection 'accounts' ...
 
-  // Start a transaction
-  await client.begin();
+  // Start a transaction (returns a dedicated Tx object)
+  const tx = await client.begin();
+  
   try {
-    // Perform operations within the transaction
-    await client.collectionItemUpdate("accounts", "acc1", { balance: 50 });
-    await client.collectionItemUpdate("accounts", "acc2", { balance: 150 });
+    // Perform operations using the 'tx' instance, NOT the 'client' instance
+    await tx.collectionItemUpdate("accounts", "acc1", { balance: 50 });
+    await tx.collectionItemUpdate("accounts", "acc2", { balance: 150 });
 
-    // If all operations succeed, commit the changes
-    await client.commit();
+    // If all operations succeed, commit the changes to disk
+    await tx.commit();
     console.log("✔ Transaction committed successfully.");
   } catch (error) {
-    // If any operation fails, roll back all changes
-    await client.rollback();
+    // If any operation fails, roll back all changes safely
+    await tx.rollback();
     console.error("✖ Transaction failed, changes were rolled back.");
   } finally {
     client.close();
@@ -104,21 +115,32 @@ async function transactionExample() {
 
 ## 🔬 Advanced Queries with the `Query` Object
 
-The `Query` interface is the most powerful feature of the client, allowing you to build complex, server-side queries. This is highly efficient as it avoids transferring entire collections over the network.
+The `Query` interface is the most powerful feature of the client, allowing you to build complex, server-side queries. LunaDB executes these using in-memory B-Trees and Zero-Copy BSON streams, making them incredibly fast.
 
 ### Query Parameters
 
 - `filter` (object): Defines conditions to select items (like a `WHERE` clause).
-- `order_by` (array): Sorts the results based on one or more fields.
+    
+- `order_by` (array): Sorts the results based on one or more fields (`[{"field": "age", "direction": "desc"}]`).
+    
 - `limit` (number): Restricts the maximum number of results returned.
-- `offset` (number): Skips a specified number of results, used for pagination.
-- `count` (boolean): If `true`, returns a count of matching items instead of the items themselves.
+    
+- `offset` (number): Skips a specified number of results. Highly optimized for Deep Pagination.
+    
+- `count` (boolean): If `true`, returns a raw count of matching items.
+    
 - `distinct` (string): Returns a list of unique values for the specified field.
+    
 - `group_by` (array): Groups results by one or more fields to perform aggregations.
-- `aggregations` (object): Defines aggregation functions to run on groups (e.g., `SUM`, `AVG`, `COUNT`).
+    
+- `aggregations` (object): Defines math functions to run on groups (e.g., `sum`, `avg`, `min`, `max`, `count`).
+    
 - `having` (object): Filters the results _after_ grouping and aggregation (like a `HAVING` clause).
-- **`projection` (array of strings)**: Selects which fields to return, reducing network traffic.
-- **`lookups` (array of objects)**: Enriches documents by joining data from other collections, similar to a `LEFT JOIN`.
+    
+- **`projection` (array of strings)**: Selects strictly which fields to return, reducing network traffic.
+    
+- **`lookups` (array of objects)**: Enriches documents by performing server-side Hash Joins with other collections.
+    
 
 ### Building Filters
 
@@ -126,24 +148,26 @@ The `filter` object is the core of your query. It can be a single condition or a
 
 **Single Condition Structure:** `{ field: "field_name", op: "operator", value: ... }`
 
-| Operator (`op`) | Description                                         | Example `value`            |
-| --------------- | --------------------------------------------------- | -------------------------- |
-| `=`             | Equal to                                            | `"some_string"` or `123`   |
-| `!=`            | Not equal to                                        | `"some_string"` or `123`   |
-| `>`             | Greater than                                        | `100`                      |
-| `>=`            | Greater than or equal to                            | `100`                      |
-| `<`             | Less than                                           | `50`                       |
-| `<=`            | Less than or equal to                               | `50`                       |
-| `like`          | Case-insensitive pattern matching (`%` is wildcard) | `"start%"` or `"%middle%"` |
-| `in`            | Value is in a list of possibilities                 | `["value1", "value2"]`     |
-| `between`       | Value is between two values (inclusive)             | `[10, 20]`                 |
-| `is null`       | The field does not exist or is `null`               | `true` (or any value)      |
-| `is not null`   | The field exists and is not `null`                  | `true` (or any value)      |
+| **Operator (op)** | **Description**                                 | **Example value**          |
+| ----------------- | ----------------------------------------------- | -------------------------- |
+| `=`               | Equal to                                        | `"some_string"` or `123`   |
+| `!=`              | Not equal to                                    | `"some_string"` or `123`   |
+| `>`               | Greater than                                    | `100`                      |
+| `>=`              | Greater than or equal to                        | `100`                      |
+| `<`               | Less than                                       | `50`                       |
+| `<=`              | Less than or equal to                           | `50`                       |
+| `like`            | Regex-backed pattern matching (`%` is wildcard) | `"start%"` or `"%middle%"` |
+| `in`              | Value is in a list of possibilities             | `["value1", "value2"]`     |
+| `between`         | Value is between two values (inclusive)         | `[10, 20]`                 |
+| `is null`         | The field does not exist or is `null`           | `true` (or any value)      |
+| `is not null`     | The field exists and is not `null`              | `true` (or any value)      |
 
-**Example: Complex Filter** This query finds all users who are active and older than 30.
+**Example: Complex Filter**
+
+This query finds all users who are active and older than 30.
+
 
 ```javascript
-// Find active users with age > 30
 const query = {
   filter: {
     and: [
@@ -153,51 +177,30 @@ const query = {
   },
 };
 const results = await client.collectionQuery("users", query);
-// Returns: [ { _id: 'u1', name: 'Elena', age: 34, active: true } ]
 ```
 
 ### Joins and Data Enrichment with `lookups`
 
-The **`lookups`** parameter allows you to perform powerful server-side joins. It accepts an array of lookup objects, which are executed in a sequence (a pipeline).
+The **`lookups`** parameter allows you to perform powerful, zero-copy server-side joins.
 
-**Example: Enriching Profiles with User Data** Based on our test data, let's query the `profiles` collection and join the user's information from the `users` collection.
 
 ```javascript
-// Sample Data:
-// users: [ { _id: 'u1', name: 'Elena' }, { _id: 'u2', name: 'Marcos' } ]
-// profiles: [ { _id: 'p1', user_id: 'u1' }, { _id: 'p2', user_id: 'u2' } ]
-
+// Enriches 'profiles' with data from 'users'
 const lookupQuery = {
   lookups: [
     {
       from: "users",
       localField: "user_id", // Field from the 'profiles' collection
-      foreignField: "_id", // Field from the 'users' collection
-      as: "user_info", // New field to store the joined user document
+      foreignField: "_id",   // Field from the 'users' collection
+      as: "user_info",       // New field to store the joined user document
     },
   ],
 };
 
 const enrichedProfiles = await client.collectionQuery("profiles", lookupQuery);
-console.log(JSON.stringify(enrichedProfiles, null, 2));
-// Output:
-// [
-//   {
-//     "_id": "p1", "user_id": "u1",
-//     "user_info": { "_id": "u1", "name": "Elena" }
-//   },
-//   {
-//     "_id": "p2", "user_id": "u2",
-//     "user_info": { "_id": "u2", "name": "Marcos" }
-//   }
-// ]
 ```
 
 ### Deep Query Example: Aggregations & Grouping
-
-You can perform powerful data analysis directly on the server.
-
-**Example: Counting Active vs. Inactive Users** Let's group the `users` collection by the `active` field and count how many fall into each category.
 
 ```javascript
 const analyticsQuery = {
@@ -206,151 +209,106 @@ const analyticsQuery = {
 
   // 2. Define the aggregations to perform on each group
   aggregations: {
-    userCount: { func: "count", field: "_id" }, // Count documents in each group
-    maxAge: { func: "max", field: "age" }, // Find the max age in each group
+    userCount: { func: "count", field: "_id" }, // Count documents
+    maxAge: { func: "max", field: "age" },      // Find max age
   },
 };
 
 const report = await client.collectionQuery("users", analyticsQuery);
-console.log(JSON.stringify(report, null, 2));
-// Example output:
-// [
-//   { "active": true, "userCount": 2, "maxAge": 34 },
-//   { "active": false, "userCount": 1, "maxAge": 45 }
-// ]
 ```
+
+---
 
 ## ⚡ API Reference
 
 ### Connection and Session
 
-#### `constructor(host, port, username?, password?, serverCertPath?, rejectUnauthorized?)`
+- **`constructor(host, port, username?, password?, serverCertPath?, rejectUnauthorized?, poolSize?)`**: Creates a new client instance.
+    
+- **`connect(): Promise<void>`**: Establishes the TLS connection pool and authenticates.
+    
+- **`close(): void`**: Closes all underlying socket connections.
+    
+- **`isAuthenticatedSession`**: Boolean indicating if the client is authenticated.
+    
+- **`authenticatedUser`**: String containing the username of the authenticated user.
+    
 
-Creates a new client instance.
+### Transaction Operations (`Tx` Object)
 
-#### `connect(): Promise<tls.TLSSocket>`
-
-Establishes the TLS connection and authenticates.
-
-#### `close(): void`
-
-Closes the underlying socket connection.
-
-#### `isAuthenticatedSession` (property)
-
-A `boolean` that is `true` if the client session is currently authenticated.
-
-#### `authenticatedUser` (property)
-
-A `string` containing the username of the authenticated user, or `null`.
-
-### Transaction Operations
-
-#### `begin(): Promise<string>`
-
-Starts a new transaction.
-
-#### `commit(): Promise<string>`
-
-Commits the current transaction, making all changes permanent.
-
-#### `rollback(): Promise<string>`
-
-Rolls back the current transaction, discarding all changes.
+- **`client.begin(): Promise<Tx>`**: Starts a new transaction and locks a connection.
+    
+- **`tx.commit(): Promise<string>`**: Commits the transaction to disk.
+    
+- **`tx.rollback(): Promise<string>`**: Discards changes and releases the connection.
+    
+- **`tx.collectionItemUpdate(...)`**: (And other mutation methods) Execute operations within the transaction scope.
+    
 
 ### Collection & Index Operations
 
-#### `collectionCreate(collectionName: string): Promise<string>`
-
-Creates a new collection.
-
-#### `collectionDelete(collectionName: string): Promise<string>`
-
-Deletes an entire collection.
-
-#### `collectionList(): Promise<string[]>`
-
-Lists all accessible collection names.
-
-#### `collectionIndexCreate(collectionName: string, fieldName: string): Promise<string>`
-
-Creates an index on a field to speed up queries.
-
-#### `collectionIndexDelete(collectionName: string, fieldName: string): Promise<string>`
-
-Deletes an index.
-
-#### `collectionIndexList(collectionName: string): Promise<string[]>`
-
-Lists all indexed fields for a collection.
+- **`collectionCreate(name: string): Promise<string>`**: Creates a new bucket on disk.
+    
+- **`collectionDelete(name: string): Promise<string>`**: Deletes a collection and its indexes.
+    
+- **`collectionList(): Promise<string[]>`**: Lists all accessible collections.
+    
+- **`collectionIndexCreate(coll: string, field: string): Promise<string>`**: Builds a B-Tree index in RAM.
+    
+- **`collectionIndexDelete(coll: string, field: string): Promise<string>`**: Removes an index.
+    
+- **`collectionIndexList(coll: string): Promise<string[]>`**: Lists all indexed fields for a collection.
+    
 
 ### Item (CRUD) Operations
 
-#### `collectionItemSet<T>(collName: string, value: T, key?: string, ttl?: number): Promise<string>`
-
-Stores an item. If `key` is omitted, a UUID is generated and assigned to the `_id` property of the `value` object.
-
-#### `collectionItemSetMany<T>(collName: string, items: T[]): Promise<string>`
-
-Stores multiple items. If `key` is omitted, a UUID is generated and assigned to the `_id` property of the `value` object.
-
-#### `collectionItemUpdate<T>(collName: string, key: string, patchValue: Partial<T>): Promise<string>`
-
-Partially updates an item.
-
-#### `collectionItemUpdateMany<T>(collName: string, items: { _id: string, patch: Partial<T> }[]): Promise<string>`
-
-Partially updates multiple items in a batch.
-
-#### `collectionItemGet<T>(collName: string, key: string): Promise<GetResult<T>>`
-
-Retrieves an item. Returns `{ found: boolean, value: T | null }`.
-
-#### `collectionItemDelete(collName:string, key: string): Promise<string>`
-
-Deletes an item by its key.
-
-#### `collectionItemDeleteMany(collName: string, keys: string[]): Promise<string>`
-
-Deletes multiple items by their keys.
+- **`collectionItemSet<T>(coll: string, value: T, key?: string, ttlSeconds?: number): Promise<T>`**: Stores an item. Returns the saved BSON document.
+    
+- **`collectionItemSetMany<T>(coll: string, items: T[]): Promise<string>`**: Stores multiple items via Group Commit.
+    
+- **`collectionItemUpdate<T>(coll: string, key: string, patchValue: Partial<T>): Promise<string>`**: Partially updates a document using BSON patching.
+    
+- **`collectionItemUpdateMany<T>(coll: string, items: { _id: string, patch: Partial<T> }[]): Promise<string>`**: Partially updates multiple items in a batch.
+    
+- **`collectionItemGet<T>(coll: string, key: string): Promise<GetResult<T>>`**: Retrieves an item.
+    
+- **`collectionItemDelete(coll: string, key: string): Promise<string>`**: Deletes a document.
+    
+- **`collectionItemDeleteMany(coll: string, keys: string[]): Promise<string>`**: Deletes multiple items by key.
+    
 
 ### Query Operations
 
-#### `collectionQuery<T>(collectionName: string, query: Query): Promise<T>`
-
-Executes a complex query. See the "Advanced Queries" section for details.
+- **`collectionQuery<T>(coll: string, query: Query): Promise<T>`**: Executes a complex query returning an array of documents, aggregations, or distinct values.
+    
 
 ---
 
 ## 🔒 Security Considerations
 
-- **TLS is Essential**: Always use TLS to encrypt data in transit.
+- **TLS is Mandatory**: LunaDB enforces TLS to encrypt data in transit.
+    
 - **Certificate Verification**: For production, always set `rejectUnauthorized` to `true` (the default) and provide a `serverCertPath` to prevent man-in-the-middle attacks.
-- **Credential Management**: Avoid hardcoding credentials. Use environment variables or a secret management service like HashiCorp Vault or AWS Secrets Manager.
-
-## Support the Project!
-
-Hello! I'm the developer behind **Memory Tools**. This is an open-source project.
-
-I've dedicated a lot of time and effort to this project, and with your support, I can continue to maintain it, add new features, and make it better for everyone.
+    
 
 ---
+
+## ❤️ Support the Project
+
+Hello! I'm **Adonay Boscán**, the developer behind **LunaDB**. This is a passionate open-source effort to build a modern, high-performance database engine from scratch.
+
+If this project has helped you scale your applications, consider supporting its continued development. Your contributions allow me to maintain the codebase, implement new features, and keep the project thriving.
 
 ### How You Can Help
 
-Every contribution, no matter the size, is a great help and is enormously appreciated. If you would like to support the continued development of this project, you can make a donation via PayPal.
+Every contribution, no matter the size, is a great help and is enormously appreciated.
 
-You can donate directly to my PayPal account by clicking the link below:
-
-**[Click here to donate](https://paypal.me/AdonayB?locale.x=es_XC&country.x=VE)**
-
----
+**[Click here to donate via PayPal](https://paypal.me/AdonayB?locale.x=es_XC&country.x=VE)**
 
 ### Other Ways to Contribute
 
-If you can't donate, don't worry! You can still help in other ways:
-
-- **Share the project:** Talk about it on social media or with your friends.
-- **Report bugs:** If you find a problem, open an issue on GitHub.
-- **Contribute code:** If you have coding skills, you can help improve the code.
-  Thank you for your support!
+- **Star the project** on GitHub.
+    
+- **Share it** with your engineering team.
+    
+- **Report bugs** or request features by opening an issue.
