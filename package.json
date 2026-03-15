@@ -1,6 +1,6 @@
 {
   "name": "lunadb-client",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Official Node.js client library for LunaDB - A high-performance, disk-first document and key-value database.",
   "main": "dist/lunadb-client.js",
   "types": "lunadb-client.d.ts",
@@ -32,7 +32,7 @@
   },
   "homepage": "https://github.com/adoboscan21/lunadb-client-NodeJS#readme",
   "files": [
-    "dist/lunadb-client.js",
+    "lunadb-client.js",
     "lunadb-client.d.ts",
     "README.md",
     "LICENSE"
