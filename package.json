@@ -1,6 +1,6 @@
 {
   "name": "lunadb-client",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Official Node.js client library for LunaDB - A high-performance, disk-first document and key-value database.",
   "main": "lunadb-client.js",
   "types": "lunadb-client.d.ts",
