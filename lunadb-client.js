@@ -26,10 +26,12 @@ const CMD_COLLECTION_QUERY = 14;
 const CMD_COLLECTION_ITEM_DELETE_MANY = 15;
 const CMD_COLLECTION_ITEM_UPDATE = 16;
 const CMD_COLLECTION_ITEM_UPDATE_MANY = 17;
-const CMD_AUTHENTICATE = 18;
-const CMD_BEGIN = 25;
-const CMD_COMMIT = 26;
-const CMD_ROLLBACK = 27;
+const CMD_COLLECTION_UPDATE_WHERE = 18;
+const CMD_COLLECTION_DELETE_WHERE = 19;
+const CMD_AUTHENTICATE = 20;
+const CMD_BEGIN = 27;
+const CMD_COMMIT = 28;
+const CMD_ROLLBACK = 29;
 const STATUS_OK = 1;
 const STATUS_NOT_FOUND = 2;
 function getStatusString(status) {
@@ -212,6 +214,27 @@ export class Tx {
             const keysPayload = keys.map(k => writeString(k));
             const payload = Buffer.concat([writeString(col), keysCountBuffer, ...keysPayload]);
             const res = yield this.execute(CMD_COLLECTION_ITEM_DELETE_MANY, payload);
+            return res.message;
+        });
+    }
+    collectionUpdateWhere(col, query, patch) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const payload = Buffer.concat([
+                writeString(col),
+                writeBytes(BSON.serialize(query)),
+                writeBytes(BSON.serialize(patch))
+            ]);
+            const res = yield this.execute(CMD_COLLECTION_UPDATE_WHERE, payload);
+            return res.message;
+        });
+    }
+    collectionDeleteWhere(col, query) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const payload = Buffer.concat([
+                writeString(col),
+                writeBytes(BSON.serialize(query))
+            ]);
+            const res = yield this.execute(CMD_COLLECTION_DELETE_WHERE, payload);
             return res.message;
         });
     }
@@ -400,6 +423,21 @@ export class LunaDBClient {
     collectionQuery(col, query) {
         const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize(query))]);
         return this.execute(CMD_COLLECTION_QUERY, payload, r => BSON.deserialize(r.data).results);
+    }
+    collectionUpdateWhere(col, query, patch) {
+        const payload = Buffer.concat([
+            writeString(col),
+            writeBytes(BSON.serialize(query)),
+            writeBytes(BSON.serialize(patch))
+        ]);
+        return this.execute(CMD_COLLECTION_UPDATE_WHERE, payload, r => r.message);
+    }
+    collectionDeleteWhere(col, query) {
+        const payload = Buffer.concat([
+            writeString(col),
+            writeBytes(BSON.serialize(query))
+        ]);
+        return this.execute(CMD_COLLECTION_DELETE_WHERE, payload, r => r.message);
     }
 }
 export default LunaDBClient;

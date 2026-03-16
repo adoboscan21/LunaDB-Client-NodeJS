@@ -18,10 +18,12 @@ const CMD_COLLECTION_QUERY = 14;
 const CMD_COLLECTION_ITEM_DELETE_MANY = 15;
 const CMD_COLLECTION_ITEM_UPDATE = 16;
 const CMD_COLLECTION_ITEM_UPDATE_MANY = 17;
-const CMD_AUTHENTICATE = 18;
-const CMD_BEGIN = 25;
-const CMD_COMMIT = 26;
-const CMD_ROLLBACK = 27;
+const CMD_COLLECTION_UPDATE_WHERE = 18;
+const CMD_COLLECTION_DELETE_WHERE = 19;
+const CMD_AUTHENTICATE = 20;
+const CMD_BEGIN = 27;
+const CMD_COMMIT = 28;
+const CMD_ROLLBACK = 29;
 
 const STATUS_OK = 1;
 const STATUS_NOT_FOUND = 2;
@@ -226,6 +228,25 @@ export class Tx {
     return res.message;
   }
 
+  public async collectionUpdateWhere(col: string, query: Query, patch: any): Promise<string> {
+    const payload = Buffer.concat([
+      writeString(col),
+      writeBytes(BSON.serialize(query)),
+      writeBytes(BSON.serialize(patch))
+    ]);
+    const res = await this.execute(CMD_COLLECTION_UPDATE_WHERE, payload);
+    return res.message;
+  }
+
+  public async collectionDeleteWhere(col: string, query: Query): Promise<string> {
+    const payload = Buffer.concat([
+      writeString(col),
+      writeBytes(BSON.serialize(query))
+    ]);
+    const res = await this.execute(CMD_COLLECTION_DELETE_WHERE, payload);
+    return res.message;
+  }
+
   public async rollback(): Promise<string> {
     if (this.closed) return "Already closed";
     const res = await this.conn.sendCommand(CMD_ROLLBACK, Buffer.alloc(0));
@@ -413,6 +434,23 @@ export class LunaDBClient {
   public collectionQuery<T = any>(col: string, query: Query): Promise<T> {
     const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize(query))]);
     return this.execute(CMD_COLLECTION_QUERY, payload, r => BSON.deserialize(r.data).results as T);
+  }
+
+  public collectionUpdateWhere(col: string, query: Query, patch: any) {
+    const payload = Buffer.concat([
+      writeString(col),
+      writeBytes(BSON.serialize(query)),
+      writeBytes(BSON.serialize(patch))
+    ]);
+    return this.execute(CMD_COLLECTION_UPDATE_WHERE, payload, r => r.message);
+  }
+
+  public collectionDeleteWhere(col: string, query: Query) {
+    const payload = Buffer.concat([
+      writeString(col),
+      writeBytes(BSON.serialize(query))
+    ]);
+    return this.execute(CMD_COLLECTION_DELETE_WHERE, payload, r => r.message);
   }
 }
 

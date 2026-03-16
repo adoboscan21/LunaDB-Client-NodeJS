@@ -1,4 +1,3 @@
-// lunadb-client.d.ts
 declare module "lunadb-client" {
   import * as tls from "node:tls";
 
@@ -49,6 +48,8 @@ declare module "lunadb-client" {
     public collectionItemUpdateMany<T = any>(collectionName: string, items: { _id: string; patch: Partial<T> }[]): Promise<string>;
     public collectionItemDelete(collectionName: string, key: string): Promise<string>;
     public collectionItemDeleteMany(collectionName: string, keys: string[]): Promise<string>;
+    public collectionUpdateWhere<T = any>(collectionName: string, query: Query, patchValue: Partial<T>): Promise<string>;
+    public collectionDeleteWhere(collectionName: string, query: Query): Promise<string>;
     public commit(): Promise<string>;
     public rollback(): Promise<string>;
   }
@@ -89,6 +90,8 @@ declare module "lunadb-client" {
     public collectionItemDelete(collectionName: string, key: string): Promise<string>;
     public collectionItemDeleteMany(collectionName: string, keys: string[]): Promise<string>;
     public collectionQuery<T = any>(collectionName: string, query: Query): Promise<T>;
+    public collectionUpdateWhere<T = any>(collectionName: string, query: Query, patchValue: Partial<T>): Promise<string>;
+    public collectionDeleteWhere(collectionName: string, query: Query): Promise<string>;
   }
 
   export default LunaDBClient;
