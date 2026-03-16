@@ -262,7 +262,7 @@ const report = await client.collectionQuery("users", analyticsQuery);
 
 ### Item (CRUD) Operations
 
-- **`collectionItemSet<T>(coll: string, value: T, key?: string, ttlSeconds?: number): Promise<T>`**: Stores an item. Returns the saved BSON document.
+- **`collectionItemSet<T>(coll: string, value: T, key?: string): Promise<T>`**: Stores an item. Returns the saved BSON document.
     
 - **`collectionItemSetMany<T>(coll: string, items: T[]): Promise<string>`**: Stores multiple items via Group Commit.
     
