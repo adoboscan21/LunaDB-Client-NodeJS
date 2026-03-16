@@ -50,12 +50,6 @@ function writeBytes(bytes) {
     lenBuffer.writeUInt32LE(buf.length, 0);
     return Buffer.concat([lenBuffer, buf]);
 }
-// Support for the 64-bit TTL required by the Go server
-function writeInt64(num) {
-    const buf = Buffer.alloc(8);
-    buf.writeBigInt64LE(BigInt(num), 0);
-    return buf;
-}
 // --- Internal Connection Wrapper ---
 class LunaDBConnection {
     constructor() {
@@ -173,8 +167,12 @@ export class Tx {
         });
     }
     collectionItemSet(col_1, value_1) {
-        return __awaiter(this, arguments, void 0, function* (col, value, key = "", ttl = 0) {
-            const payload = Buffer.concat([writeString(col), writeString(key), writeBytes(BSON.serialize(value)), writeInt64(ttl)]);
+        return __awaiter(this, arguments, void 0, function* (col, value, key = "") {
+            const payload = Buffer.concat([
+                writeString(col),
+                writeString(key),
+                writeBytes(BSON.serialize(value))
+            ]);
             const res = yield this.execute(CMD_COLLECTION_ITEM_SET, payload);
             return res.message;
         });
@@ -362,12 +360,11 @@ export class LunaDBClient {
             return BSON.deserialize(r.data).list;
         });
     }
-    collectionItemSet(col, value, key = "", ttlSeconds = 0) {
+    collectionItemSet(col, value, key = "") {
         const payload = Buffer.concat([
             writeString(col),
             writeString(key),
-            writeBytes(BSON.serialize(value)),
-            writeInt64(ttlSeconds)
+            writeBytes(BSON.serialize(value))
         ]);
         return this.execute(CMD_COLLECTION_ITEM_SET, payload, r => BSON.deserialize(r.data));
     }

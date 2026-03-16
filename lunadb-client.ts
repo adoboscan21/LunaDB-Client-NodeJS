@@ -73,13 +73,6 @@ function writeBytes(bytes: Buffer | Uint8Array): Buffer {
   return Buffer.concat([lenBuffer, buf]);
 }
 
-// Support for the 64-bit TTL required by the Go server
-function writeInt64(num: number): Buffer {
-  const buf = Buffer.alloc(8);
-  buf.writeBigInt64LE(BigInt(num), 0);
-  return buf;
-}
-
 // --- Internal Connection Wrapper ---
 class LunaDBConnection {
   public socket: tls.TLSSocket | null = null;
@@ -190,8 +183,12 @@ export class Tx {
     }
   }
 
-  public async collectionItemSet(col: string, value: any, key: string = "", ttl: number = 0): Promise<string> {
-    const payload = Buffer.concat([writeString(col), writeString(key), writeBytes(BSON.serialize(value)), writeInt64(ttl)]);
+  public async collectionItemSet(col: string, value: any, key: string = ""): Promise<string> {
+    const payload = Buffer.concat([
+      writeString(col),
+      writeString(key),
+      writeBytes(BSON.serialize(value))
+    ]);
     const res = await this.execute(CMD_COLLECTION_ITEM_SET, payload);
     return res.message;
   }
@@ -370,12 +367,11 @@ export class LunaDBClient {
     });
   }
 
-  public collectionItemSet<T = any>(col: string, value: T, key: string = "", ttlSeconds: number = 0): Promise<T> {
+  public collectionItemSet<T = any>(col: string, value: T, key: string = ""): Promise<T> {
     const payload = Buffer.concat([
       writeString(col),
       writeString(key),
-      writeBytes(BSON.serialize(value as any)),
-      writeInt64(ttlSeconds)
+      writeBytes(BSON.serialize(value as any))
     ]);
     return this.execute(CMD_COLLECTION_ITEM_SET, payload, r => BSON.deserialize(r.data) as T);
   }

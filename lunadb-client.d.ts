@@ -43,7 +43,7 @@ declare module "lunadb-client" {
 
   // --- Transaction Class ---
   export class Tx {
-    public collectionItemSet<T = any>(collectionName: string, value: T, key?: string, ttlSeconds?: number): Promise<string>;
+    public collectionItemSet<T = any>(collectionName: string, value: T, key?: string): Promise<string>;
     public collectionItemSetMany<T extends { _id?: string }>(collectionName: string, items: T[]): Promise<string>;
     public collectionItemUpdate<T = any>(collectionName: string, key: string, patchValue: Partial<T>): Promise<string>;
     public collectionItemUpdateMany<T = any>(collectionName: string, items: { _id: string; patch: Partial<T> }[]): Promise<string>;
@@ -81,7 +81,7 @@ declare module "lunadb-client" {
     public collectionIndexDelete(collectionName: string, fieldName: string): Promise<string>;
     public collectionIndexList(collectionName: string): Promise<string[]>;
 
-    public collectionItemSet<T = any>(collectionName: string, value: T, key?: string, ttlSeconds?: number): Promise<T>;
+    public collectionItemSet<T = any>(collectionName: string, value: T, key?: string): Promise<T>;
     public collectionItemSetMany<T extends { _id?: string }>(collectionName: string, items: T[]): Promise<string>;
     public collectionItemUpdate<T = any>(collectionName: string, key: string, patchValue: Partial<T>): Promise<string>;
     public collectionItemUpdateMany<T = any>(collectionName: string, items: { _id: string; patch: Partial<T> }[]): Promise<string>;
