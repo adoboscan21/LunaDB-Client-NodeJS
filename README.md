@@ -9,10 +9,8 @@ An asynchronous, connection-pooled Node.js client for interacting with the **Lun
 ### Installation
 
 ```bash
-npm install lunadb-client bson
+npm install lunadb-client
 ````
-
-_(Note: `bson` is a required peer dependency as LunaDB communicates using native binary BSON for maximum performance)._
 
 ### Connection and Basic Operations
 
