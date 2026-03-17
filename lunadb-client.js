@@ -12,31 +12,41 @@ import fs from "node:fs";
 import { Buffer } from "node:buffer";
 import { BSON } from "bson";
 // --- Protocol Constants ---
-const CMD_COLLECTION_CREATE = 3;
-const CMD_COLLECTION_DELETE = 4;
-const CMD_COLLECTION_LIST = 5;
-const CMD_COLLECTION_INDEX_CREATE = 6;
-const CMD_COLLECTION_INDEX_DELETE = 7;
-const CMD_COLLECTION_INDEX_LIST = 8;
-const CMD_COLLECTION_ITEM_SET = 9;
-const CMD_COLLECTION_ITEM_SET_MANY = 10;
-const CMD_COLLECTION_ITEM_GET = 11;
-const CMD_COLLECTION_ITEM_DELETE = 12;
-const CMD_COLLECTION_QUERY = 14;
-const CMD_COLLECTION_ITEM_DELETE_MANY = 15;
-const CMD_COLLECTION_ITEM_UPDATE = 16;
-const CMD_COLLECTION_ITEM_UPDATE_MANY = 17;
-const CMD_COLLECTION_UPDATE_WHERE = 18;
-const CMD_COLLECTION_DELETE_WHERE = 19;
-const CMD_AUTHENTICATE = 20;
-const CMD_BEGIN = 27;
-const CMD_COMMIT = 28;
-const CMD_ROLLBACK = 29;
+// Collection Management Commands
+const CMD_COLLECTION_CREATE = 1;
+const CMD_COLLECTION_DELETE = 2;
+const CMD_COLLECTION_LIST = 3;
+const CMD_COLLECTION_INDEX_CREATE = 4;
+const CMD_COLLECTION_INDEX_DELETE = 5;
+const CMD_COLLECTION_INDEX_LIST = 6;
+// Collection Item Commands
+const CMD_COLLECTION_ITEM_SET = 7;
+const CMD_COLLECTION_ITEM_SET_MANY = 8;
+const CMD_COLLECTION_ITEM_GET = 9;
+const CMD_COLLECTION_ITEM_DELETE = 10;
+const CMD_COLLECTION_QUERY = 12;
+const CMD_COLLECTION_ITEM_DELETE_MANY = 13;
+const CMD_COLLECTION_ITEM_UPDATE = 14;
+const CMD_COLLECTION_ITEM_UPDATE_MANY = 15;
+const CMD_COLLECTION_UPDATE_WHERE = 16;
+const CMD_COLLECTION_DELETE_WHERE = 17;
+// Authentication Commands
+const CMD_AUTHENTICATE = 18;
+// Transaction Commands
+const CMD_BEGIN = 25;
+const CMD_COMMIT = 26;
+const CMD_ROLLBACK = 27;
+// --- Status Codes ---
 const STATUS_OK = 1;
 const STATUS_NOT_FOUND = 2;
 function getStatusString(status) {
     const statuses = {
-        1: "OK", 2: "NOT_FOUND", 3: "ERROR", 4: "BAD_COMMAND", 5: "UNAUTHORIZED", 6: "BAD_REQUEST",
+        1: "OK",
+        2: "NOT_FOUND",
+        3: "ERROR",
+        4: "BAD_COMMAND",
+        5: "UNAUTHORIZED",
+        6: "BAD_REQUEST",
     };
     return statuses[status] || "UNKNOWN_STATUS";
 }
