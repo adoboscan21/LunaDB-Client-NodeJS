@@ -284,6 +284,7 @@ export class LunaDBClient {
         this.poolSize = poolSize;
         this.pool = [];
         this.waiters = [];
+        this.activeConnections = 0;
     }
     get isAuthenticatedSession() {
         return !!this.username;
@@ -293,45 +294,60 @@ export class LunaDBClient {
     }
     connect() {
         return __awaiter(this, void 0, void 0, function* () {
-            const promises = [];
-            for (let i = 0; i < this.poolSize; i++) {
-                promises.push(this.createNewConnection());
-            }
-            yield Promise.all(promises);
-        });
-    }
-    createNewConnection() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const conn = new LunaDBConnection();
-            yield conn.connect(this.host, this.port, this.username, this.password, this.serverCertPath, this.rejectUnauthorized);
-            this.pool.push(conn);
-            return conn;
+            // Lazy Loading: Test connection to ensure credentials/network are valid
+            const testConn = yield this.acquire();
+            this.release(testConn);
         });
     }
     close() {
         for (const conn of this.pool)
             conn.close();
         this.pool = [];
+        this.activeConnections = 0;
+        for (const waiter of this.waiters)
+            waiter.reject(new Error("Client closed manually"));
+        this.waiters = [];
     }
     acquire() {
         return __awaiter(this, void 0, void 0, function* () {
-            while (this.pool.length > 0) {
-                const conn = this.pool.pop();
-                if (!conn.isClosed)
-                    return conn; // Toss out dead connections
+            // Clean dead connections
+            this.pool = this.pool.filter(c => !c.isClosed);
+            if (this.pool.length > 0) {
+                return this.pool.pop();
             }
-            return new Promise(resolve => this.waiters.push(resolve));
+            if (this.activeConnections < this.poolSize) {
+                this.activeConnections++;
+                const conn = new LunaDBConnection();
+                try {
+                    yield conn.connect(this.host, this.port, this.username, this.password, this.serverCertPath, this.rejectUnauthorized);
+                    // Auto-heal logic
+                    conn.socket.once("close", () => {
+                        this.activeConnections--;
+                        this.pool = this.pool.filter(c => c !== conn);
+                    });
+                    return conn;
+                }
+                catch (err) {
+                    this.activeConnections--;
+                    throw new Error(`LunaDB connection failed: ${err.message}`);
+                }
+            }
+            return new Promise((resolve, reject) => {
+                this.waiters.push({ resolve, reject });
+            });
         });
     }
     release(conn) {
         if (conn.isClosed) {
-            // Heal the pool asynchronously if the connection died
-            this.createNewConnection().catch(() => { });
+            if (this.waiters.length > 0) {
+                const waiter = this.waiters.shift();
+                this.acquire().then(waiter.resolve).catch(waiter.reject);
+            }
             return;
         }
         if (this.waiters.length > 0) {
-            const resolve = this.waiters.shift();
-            resolve(conn);
+            const waiter = this.waiters.shift();
+            waiter.resolve(conn);
         }
         else {
             this.pool.push(conn);

@@ -281,7 +281,8 @@ export class Tx {
 // --- Main Client (Connection Pool Manager) ---
 export class LunaDBClient {
   private pool: LunaDBConnection[] = [];
-  private waiters: ((conn: LunaDBConnection) => void)[] = [];
+  private waiters: { resolve: (conn: LunaDBConnection) => void, reject: (err: Error) => void }[] = [];
+  private activeConnections: number = 0;
 
   constructor(
     private host: string,
@@ -302,43 +303,63 @@ export class LunaDBClient {
   }
 
   public async connect(): Promise<void> {
-    const promises = [];
-    for (let i = 0; i < this.poolSize; i++) {
-      promises.push(this.createNewConnection());
-    }
-    await Promise.all(promises);
-  }
-
-  private async createNewConnection(): Promise<LunaDBConnection> {
-    const conn = new LunaDBConnection();
-    await conn.connect(this.host, this.port, this.username, this.password, this.serverCertPath, this.rejectUnauthorized);
-    this.pool.push(conn);
-    return conn;
+    // Lazy Loading: Test connection to ensure credentials/network are valid
+    const testConn = await this.acquire();
+    this.release(testConn);
   }
 
   public close(): void {
     for (const conn of this.pool) conn.close();
     this.pool = [];
+    this.activeConnections = 0;
+    for (const waiter of this.waiters) waiter.reject(new Error("Client closed manually"));
+    this.waiters = [];
   }
 
   private async acquire(): Promise<LunaDBConnection> {
-    while (this.pool.length > 0) {
-      const conn = this.pool.pop()!;
-      if (!conn.isClosed) return conn; // Toss out dead connections
+    // Clean dead connections
+    this.pool = this.pool.filter(c => !c.isClosed);
+
+    if (this.pool.length > 0) {
+      return this.pool.pop()!;
     }
-    return new Promise(resolve => this.waiters.push(resolve));
+
+    if (this.activeConnections < this.poolSize) {
+      this.activeConnections++;
+      const conn = new LunaDBConnection();
+      try {
+        await conn.connect(this.host, this.port, this.username, this.password, this.serverCertPath, this.rejectUnauthorized);
+
+        // Auto-heal logic
+        conn.socket!.once("close", () => {
+          this.activeConnections--;
+          this.pool = this.pool.filter(c => c !== conn);
+        });
+
+        return conn;
+      } catch (err: any) {
+        this.activeConnections--;
+        throw new Error(`LunaDB connection failed: ${err.message}`);
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
+    });
   }
 
   public release(conn: LunaDBConnection): void {
     if (conn.isClosed) {
-      // Heal the pool asynchronously if the connection died
-      this.createNewConnection().catch(() => { });
+      if (this.waiters.length > 0) {
+        const waiter = this.waiters.shift()!;
+        this.acquire().then(waiter.resolve).catch(waiter.reject);
+      }
       return;
     }
 
     if (this.waiters.length > 0) {
-      const resolve = this.waiters.shift()!;
-      resolve(conn);
+      const waiter = this.waiters.shift()!;
+      waiter.resolve(conn);
     } else {
       this.pool.push(conn);
     }
