@@ -1,11 +1,15 @@
 declare module "lunadb-client" {
   import * as tls from "node:tls";
 
-  // --- Interfaces for results---
+  // --- Interfaces for results ---
   export interface GetResult<T = any> {
     found: boolean;
     message: string;
     value: T | null;
+  }
+
+  export interface MutationResult {
+    Message: string;
   }
 
   // --- Interfaces for queries ---
@@ -42,16 +46,43 @@ declare module "lunadb-client" {
 
   // --- Transaction Class ---
   export class Tx {
-    public collectionItemSet<T = any>(collectionName: string, value: T, key?: string): Promise<string>;
-    public collectionItemSetMany<T extends { _id?: string }>(collectionName: string, items: T[]): Promise<string>;
-    public collectionItemUpdate<T = any>(collectionName: string, key: string, patchValue: Partial<T>): Promise<string>;
-    public collectionItemUpdateMany<T = any>(collectionName: string, items: { _id: string; patch: Partial<T> }[]): Promise<string>;
-    public collectionItemDelete(collectionName: string, key: string): Promise<string>;
-    public collectionItemDeleteMany(collectionName: string, keys: string[]): Promise<string>;
-    public collectionUpdateWhere<T = any>(collectionName: string, query: Query, patchValue: Partial<T>): Promise<string>;
-    public collectionDeleteWhere(collectionName: string, query: Query): Promise<string>;
-    public commit(): Promise<string>;
-    public rollback(): Promise<string>;
+    public collectionItemSet<T = any>(
+      collectionName: string,
+      value: T,
+      key?: string,
+    ): Promise<MutationResult>;
+    public collectionItemSetMany<T extends { _id?: string }>(
+      collectionName: string,
+      items: T[],
+    ): Promise<MutationResult>;
+    public collectionItemUpdate<T = any>(
+      collectionName: string,
+      key: string,
+      patchValue: Partial<T>,
+    ): Promise<MutationResult>;
+    public collectionItemUpdateMany<T = any>(
+      collectionName: string,
+      items: { _id: string; patch: Partial<T> }[],
+    ): Promise<MutationResult>;
+    public collectionItemDelete(
+      collectionName: string,
+      key: string,
+    ): Promise<MutationResult>;
+    public collectionItemDeleteMany(
+      collectionName: string,
+      keys: string[],
+    ): Promise<MutationResult>;
+    public collectionUpdateWhere<T = any>(
+      collectionName: string,
+      query: Query,
+      patchValue: Partial<T>,
+    ): Promise<MutationResult>;
+    public collectionDeleteWhere(
+      collectionName: string,
+      query: Query,
+    ): Promise<MutationResult>;
+    public commit(): Promise<MutationResult>;
+    public rollback(): Promise<MutationResult>;
   }
 
   // --- Main Client Class ---
@@ -63,7 +94,7 @@ declare module "lunadb-client" {
       password?: string,
       serverCertPath?: string,
       rejectUnauthorized?: boolean,
-      poolSize?: number
+      poolSize?: number,
     );
 
     public readonly isAuthenticatedSession: boolean;
@@ -74,24 +105,63 @@ declare module "lunadb-client" {
 
     public begin(): Promise<Tx>;
 
-    public collectionCreate(collectionName: string): Promise<string>;
-    public collectionDelete(collectionName: string): Promise<string>;
+    public collectionCreate(collectionName: string): Promise<MutationResult>;
+    public collectionDelete(collectionName: string): Promise<MutationResult>;
     public collectionList(): Promise<string[]>;
 
-    public collectionIndexCreate(collectionName: string, fieldName: string): Promise<string>;
-    public collectionIndexDelete(collectionName: string, fieldName: string): Promise<string>;
+    public collectionIndexCreate(
+      collectionName: string,
+      fieldName: string,
+    ): Promise<MutationResult>;
+    public collectionIndexDelete(
+      collectionName: string,
+      fieldName: string,
+    ): Promise<MutationResult>;
     public collectionIndexList(collectionName: string): Promise<string[]>;
 
-    public collectionItemSet<T = any>(collectionName: string, value: T, key?: string): Promise<T>;
-    public collectionItemSetMany<T extends { _id?: string }>(collectionName: string, items: T[]): Promise<string>;
-    public collectionItemUpdate<T = any>(collectionName: string, key: string, patchValue: Partial<T>): Promise<string>;
-    public collectionItemUpdateMany<T = any>(collectionName: string, items: { _id: string; patch: Partial<T> }[]): Promise<string>;
-    public collectionItemGet<T = any>(collectionName: string, key: string): Promise<GetResult<T>>;
-    public collectionItemDelete(collectionName: string, key: string): Promise<string>;
-    public collectionItemDeleteMany(collectionName: string, keys: string[]): Promise<string>;
-    public collectionQuery<T = any>(collectionName: string, query: Query): Promise<T>;
-    public collectionUpdateWhere<T = any>(collectionName: string, query: Query, patchValue: Partial<T>): Promise<string>;
-    public collectionDeleteWhere(collectionName: string, query: Query): Promise<string>;
+    public collectionItemSet<T = any>(
+      collectionName: string,
+      value: T,
+      key?: string,
+    ): Promise<T>;
+    public collectionItemSetMany<T extends { _id?: string }>(
+      collectionName: string,
+      items: T[],
+    ): Promise<MutationResult>;
+    public collectionItemUpdate<T = any>(
+      collectionName: string,
+      key: string,
+      patchValue: Partial<T>,
+    ): Promise<MutationResult>;
+    public collectionItemUpdateMany<T = any>(
+      collectionName: string,
+      items: { _id: string; patch: Partial<T> }[],
+    ): Promise<MutationResult>;
+    public collectionItemGet<T = any>(
+      collectionName: string,
+      key: string,
+    ): Promise<GetResult<T>>;
+    public collectionItemDelete(
+      collectionName: string,
+      key: string,
+    ): Promise<MutationResult>;
+    public collectionItemDeleteMany(
+      collectionName: string,
+      keys: string[],
+    ): Promise<MutationResult>;
+    public collectionQuery<T = any>(
+      collectionName: string,
+      query: Query,
+    ): Promise<T>;
+    public collectionUpdateWhere<T = any>(
+      collectionName: string,
+      query: Query,
+      patchValue: Partial<T>,
+    ): Promise<MutationResult>;
+    public collectionDeleteWhere(
+      collectionName: string,
+      query: Query,
+    ): Promise<MutationResult>;
   }
 
   export default LunaDBClient;

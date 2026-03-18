@@ -12,14 +12,12 @@ import fs from "node:fs";
 import { Buffer } from "node:buffer";
 import { BSON } from "bson";
 // --- Protocol Constants ---
-// Collection Management Commands
 const CMD_COLLECTION_CREATE = 1;
 const CMD_COLLECTION_DELETE = 2;
 const CMD_COLLECTION_LIST = 3;
 const CMD_COLLECTION_INDEX_CREATE = 4;
 const CMD_COLLECTION_INDEX_DELETE = 5;
 const CMD_COLLECTION_INDEX_LIST = 6;
-// Collection Item Commands
 const CMD_COLLECTION_ITEM_SET = 7;
 const CMD_COLLECTION_ITEM_SET_MANY = 8;
 const CMD_COLLECTION_ITEM_GET = 9;
@@ -30,13 +28,10 @@ const CMD_COLLECTION_ITEM_UPDATE = 14;
 const CMD_COLLECTION_ITEM_UPDATE_MANY = 15;
 const CMD_COLLECTION_UPDATE_WHERE = 16;
 const CMD_COLLECTION_DELETE_WHERE = 17;
-// Authentication Commands
 const CMD_AUTHENTICATE = 18;
-// Transaction Commands
 const CMD_BEGIN = 25;
 const CMD_COMMIT = 26;
 const CMD_ROLLBACK = 27;
-// --- Status Codes ---
 const STATUS_OK = 1;
 const STATUS_NOT_FOUND = 2;
 function getStatusString(status) {
@@ -50,43 +45,98 @@ function getStatusString(status) {
     };
     return statuses[status] || "UNKNOWN_STATUS";
 }
-function writeString(str) {
-    const strBuffer = Buffer.from(str, "utf8");
-    const lenBuffer = Buffer.alloc(4);
-    lenBuffer.writeUInt32LE(strBuffer.length, 0);
-    return Buffer.concat([lenBuffer, strBuffer]);
-}
-function writeBytes(bytes) {
-    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-    const lenBuffer = Buffer.alloc(4);
-    lenBuffer.writeUInt32LE(buf.length, 0);
-    return Buffer.concat([lenBuffer, buf]);
+// 🚀 HIGH PERFORMANCE ZERO-COPY FRAME BUILDER
+// Soporta Uint8Array (BSON) nativo y lo convierte a Node Buffer sin duplicar memoria
+function buildFrame(cmd, ...args) {
+    let size = 1; // 1 byte para el comando
+    const parsedArgs = args.map((arg) => {
+        if (typeof arg === "string") {
+            const b = Buffer.from(arg, "utf8");
+            size += 4 + b.length;
+            return { type: "buf", data: b };
+        }
+        else if (arg instanceof Uint8Array) {
+            // ZERO-COPY CAST: Usamos el buffer de memoria subyacente directamente
+            const b = Buffer.isBuffer(arg)
+                ? arg
+                : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength);
+            size += 4 + b.length;
+            return { type: "buf", data: b };
+        }
+        else if (Array.isArray(arg)) {
+            size += 4; // 4 bytes para la cantidad de llaves
+            const bufs = arg.map((s) => Buffer.from(s, "utf8"));
+            for (const b of bufs)
+                size += 4 + b.length;
+            return { type: "arr", data: bufs };
+        }
+        throw new Error("Invalid argument type for frame builder");
+    });
+    const buf = Buffer.allocUnsafe(size);
+    let offset = 0;
+    buf.writeUInt8(cmd, offset++);
+    for (const arg of parsedArgs) {
+        if (arg.type === "buf") {
+            const b = arg.data;
+            buf.writeUInt32LE(b.length, offset);
+            offset += 4;
+            b.copy(buf, offset);
+            offset += b.length;
+        }
+        else if (arg.type === "arr") {
+            const arr = arg.data;
+            buf.writeUInt32LE(arr.length, offset);
+            offset += 4;
+            for (const b of arr) {
+                buf.writeUInt32LE(b.length, offset);
+                offset += 4;
+                b.copy(buf, offset);
+                offset += b.length;
+            }
+        }
+    }
+    return buf;
 }
 // --- Internal Connection Wrapper ---
 class LunaDBConnection {
     constructor() {
         this.socket = null;
-        this.isClosed = false; // Tracks socket health
-        this.responseBuffer = Buffer.alloc(0);
+        this.isClosed = false;
+        this.responseBuffer = Buffer.allocUnsafe(0);
         this.responseWaiter = null;
         this.errorWaiter = null;
     }
     connect(host, port, user, pass, cert, rejectAuth = true) {
         return new Promise((resolve, reject) => {
-            const options = { host, port, rejectUnauthorized: rejectAuth };
+            const options = {
+                host,
+                port,
+                rejectUnauthorized: rejectAuth,
+            };
             if (cert)
                 options.ca = [fs.readFileSync(cert)];
             this.socket = tls.connect(options, () => __awaiter(this, void 0, void 0, function* () {
                 this.socket.on("data", (chunk) => {
-                    this.responseBuffer = Buffer.concat([this.responseBuffer, chunk]);
+                    if (this.responseBuffer.length === 0) {
+                        this.responseBuffer = chunk;
+                    }
+                    else {
+                        this.responseBuffer = Buffer.concat([this.responseBuffer, chunk]);
+                    }
                     this.tryProcessResponse();
                 });
-                this.socket.on("close", () => { this.isClosed = true; this.triggerError(new Error("Socket closed by remote peer")); });
-                this.socket.on("error", (err) => { this.isClosed = true; this.triggerError(err); });
+                this.socket.on("close", () => {
+                    this.isClosed = true;
+                    this.triggerError(new Error("Socket closed"));
+                });
+                this.socket.on("error", (err) => {
+                    this.isClosed = true;
+                    this.triggerError(err);
+                });
                 if (user && pass) {
                     try {
-                        const payload = Buffer.concat([writeString(user), writeString(pass)]);
-                        const res = yield this.sendCommand(CMD_AUTHENTICATE, payload);
+                        const frame = buildFrame(CMD_AUTHENTICATE, user, pass);
+                        const res = yield this.sendFrame(frame);
                         if (res.status !== STATUS_OK)
                             return reject(new Error(`Auth failed: ${res.message}`));
                     }
@@ -109,9 +159,7 @@ class LunaDBConnection {
     tryProcessResponse() {
         if (!this.responseWaiter)
             return;
-        while (true) {
-            if (this.responseBuffer.length < 5)
-                return;
+        while (this.responseBuffer.length >= 5) {
             const msgLen = this.responseBuffer.readUInt32LE(1);
             const reqForDataLen = 5 + msgLen + 4;
             if (this.responseBuffer.length < reqForDataLen)
@@ -122,8 +170,13 @@ class LunaDBConnection {
                 return;
             const status = this.responseBuffer.readUInt8(0);
             const message = this.responseBuffer.toString("utf8", 5, 5 + msgLen);
-            const data = this.responseBuffer.subarray(reqForDataLen, totalLen);
-            this.responseBuffer = this.responseBuffer.subarray(totalLen);
+            const data = Buffer.from(this.responseBuffer.subarray(reqForDataLen, totalLen));
+            if (this.responseBuffer.length === totalLen) {
+                this.responseBuffer = Buffer.allocUnsafe(0);
+            }
+            else {
+                this.responseBuffer = this.responseBuffer.subarray(totalLen);
+            }
             const waiter = this.responseWaiter;
             this.responseWaiter = null;
             this.errorWaiter = null;
@@ -132,14 +185,14 @@ class LunaDBConnection {
                 return;
         }
     }
-    sendCommand(cmd, payload) {
+    sendFrame(frame) {
         return __awaiter(this, void 0, void 0, function* () {
             if (this.isClosed)
-                throw new Error("Cannot send command: Connection is dead");
+                throw new Error("Connection is dead");
             return new Promise((resolve, reject) => {
                 this.responseWaiter = resolve;
                 this.errorWaiter = reject;
-                this.socket.write(Buffer.concat([Buffer.from([cmd]), payload]), (err) => {
+                this.socket.write(frame, (err) => {
                     if (err) {
                         this.isClosed = true;
                         this.triggerError(err);
@@ -161,120 +214,107 @@ export class Tx {
         this.conn = conn;
         this.closed = false;
     }
-    execute(cmd, payload) {
+    execute(frame) {
         return __awaiter(this, void 0, void 0, function* () {
             if (this.closed)
                 throw new Error("Transaction is already closed");
             try {
-                const res = yield this.conn.sendCommand(cmd, payload);
+                const res = yield this.conn.sendFrame(frame);
                 if (res.status !== STATUS_OK)
                     throw new Error(res.message);
                 return res;
             }
             catch (err) {
                 this.closed = true;
-                this.client.release(this.conn); // Release on error (server will auto-rollback dead connections)
+                this.client.release(this.conn);
                 throw err;
             }
         });
     }
     collectionItemSet(col_1, value_1) {
         return __awaiter(this, arguments, void 0, function* (col, value, key = "") {
-            const payload = Buffer.concat([
-                writeString(col),
-                writeString(key),
-                writeBytes(BSON.serialize(value))
-            ]);
-            const res = yield this.execute(CMD_COLLECTION_ITEM_SET, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_ITEM_SET, col, key, BSON.serialize(value));
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionItemSetMany(col, items) {
         return __awaiter(this, void 0, void 0, function* () {
-            const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-            const res = yield this.execute(CMD_COLLECTION_ITEM_SET_MANY, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_ITEM_SET_MANY, col, BSON.serialize({ array: items }));
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionItemUpdate(col, key, patch) {
         return __awaiter(this, void 0, void 0, function* () {
-            const payload = Buffer.concat([writeString(col), writeString(key), writeBytes(BSON.serialize(patch))]);
-            const res = yield this.execute(CMD_COLLECTION_ITEM_UPDATE, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_ITEM_UPDATE, col, key, BSON.serialize(patch));
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionItemUpdateMany(col, items) {
         return __awaiter(this, void 0, void 0, function* () {
-            const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-            const res = yield this.execute(CMD_COLLECTION_ITEM_UPDATE_MANY, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_ITEM_UPDATE_MANY, col, BSON.serialize({ array: items }));
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionItemDelete(col, key) {
         return __awaiter(this, void 0, void 0, function* () {
-            const payload = Buffer.concat([writeString(col), writeString(key)]);
-            const res = yield this.execute(CMD_COLLECTION_ITEM_DELETE, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_ITEM_DELETE, col, key);
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionItemDeleteMany(col, keys) {
         return __awaiter(this, void 0, void 0, function* () {
-            const keysCountBuffer = Buffer.alloc(4);
-            keysCountBuffer.writeUInt32LE(keys.length, 0);
-            const keysPayload = keys.map(k => writeString(k));
-            const payload = Buffer.concat([writeString(col), keysCountBuffer, ...keysPayload]);
-            const res = yield this.execute(CMD_COLLECTION_ITEM_DELETE_MANY, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_ITEM_DELETE_MANY, col, keys);
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionUpdateWhere(col, query, patch) {
         return __awaiter(this, void 0, void 0, function* () {
-            const payload = Buffer.concat([
-                writeString(col),
-                writeBytes(BSON.serialize(query)),
-                writeBytes(BSON.serialize(patch))
-            ]);
-            const res = yield this.execute(CMD_COLLECTION_UPDATE_WHERE, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_UPDATE_WHERE, col, BSON.serialize(query), BSON.serialize(patch));
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     collectionDeleteWhere(col, query) {
         return __awaiter(this, void 0, void 0, function* () {
-            const payload = Buffer.concat([
-                writeString(col),
-                writeBytes(BSON.serialize(query))
-            ]);
-            const res = yield this.execute(CMD_COLLECTION_DELETE_WHERE, payload);
-            return res.message;
+            const frame = buildFrame(CMD_COLLECTION_DELETE_WHERE, col, BSON.serialize(query));
+            const res = yield this.execute(frame);
+            return { Message: res.message };
         });
     }
     rollback() {
         return __awaiter(this, void 0, void 0, function* () {
             if (this.closed)
-                return "Already closed";
-            const res = yield this.conn.sendCommand(CMD_ROLLBACK, Buffer.alloc(0));
+                return { Message: "Already closed" };
+            const frame = Buffer.from([CMD_ROLLBACK]);
+            const res = yield this.conn.sendFrame(frame);
             this.closed = true;
             this.client.release(this.conn);
-            return res.message;
+            return { Message: res.message };
         });
     }
     commit() {
         return __awaiter(this, void 0, void 0, function* () {
             if (this.closed)
                 throw new Error("Transaction is already closed");
-            const res = yield this.conn.sendCommand(CMD_COMMIT, Buffer.alloc(0));
+            const frame = Buffer.from([CMD_COMMIT]);
+            const res = yield this.conn.sendFrame(frame);
             this.closed = true;
             this.client.release(this.conn);
             if (res.status !== STATUS_OK)
                 throw new Error(res.message);
-            return res.message;
+            return { Message: res.message };
         });
     }
 }
 // --- Main Client (Connection Pool Manager) ---
 export class LunaDBClient {
-    constructor(host, port, username, password, serverCertPath, rejectUnauthorized = true, poolSize = 10 // Sensible default
-    ) {
+    constructor(host, port, username, password, serverCertPath, rejectUnauthorized = true, poolSize = 100) {
         this.host = host;
         this.port = port;
         this.username = username;
@@ -286,15 +326,8 @@ export class LunaDBClient {
         this.waiters = [];
         this.activeConnections = 0;
     }
-    get isAuthenticatedSession() {
-        return !!this.username;
-    }
-    get authenticatedUser() {
-        return this.username || null;
-    }
     connect() {
         return __awaiter(this, void 0, void 0, function* () {
-            // Lazy Loading: Test connection to ensure credentials/network are valid
             const testConn = yield this.acquire();
             this.release(testConn);
         });
@@ -305,25 +338,22 @@ export class LunaDBClient {
         this.pool = [];
         this.activeConnections = 0;
         for (const waiter of this.waiters)
-            waiter.reject(new Error("Client closed manually"));
+            waiter.reject(new Error("Client closed"));
         this.waiters = [];
     }
     acquire() {
         return __awaiter(this, void 0, void 0, function* () {
-            // Clean dead connections
-            this.pool = this.pool.filter(c => !c.isClosed);
-            if (this.pool.length > 0) {
+            this.pool = this.pool.filter((c) => !c.isClosed);
+            if (this.pool.length > 0)
                 return this.pool.pop();
-            }
             if (this.activeConnections < this.poolSize) {
                 this.activeConnections++;
                 const conn = new LunaDBConnection();
                 try {
                     yield conn.connect(this.host, this.port, this.username, this.password, this.serverCertPath, this.rejectUnauthorized);
-                    // Auto-heal logic
                     conn.socket.once("close", () => {
                         this.activeConnections--;
-                        this.pool = this.pool.filter(c => c !== conn);
+                        this.pool = this.pool.filter((c) => c !== conn);
                     });
                     return conn;
                 }
@@ -353,11 +383,11 @@ export class LunaDBClient {
             this.pool.push(conn);
         }
     }
-    execute(cmd, payload, parser) {
+    execute(frame, parser) {
         return __awaiter(this, void 0, void 0, function* () {
             const conn = yield this.acquire();
             try {
-                const res = yield conn.sendCommand(cmd, payload);
+                const res = yield conn.sendFrame(frame);
                 if (res.status !== STATUS_OK && res.status !== STATUS_NOT_FOUND) {
                     throw new Error(`${getStatusString(res.status)}: ${res.message}`);
                 }
@@ -365,8 +395,8 @@ export class LunaDBClient {
                 return parser(res);
             }
             catch (err) {
-                conn.close(); // Force kill on error to prevent protocol desync
-                this.release(conn); // Release will trigger self-healing
+                conn.close();
+                this.release(conn);
                 throw err;
             }
         });
@@ -375,7 +405,8 @@ export class LunaDBClient {
         return __awaiter(this, void 0, void 0, function* () {
             const conn = yield this.acquire();
             try {
-                const res = yield conn.sendCommand(CMD_BEGIN, Buffer.alloc(0));
+                const frame = Buffer.from([CMD_BEGIN]);
+                const res = yield conn.sendFrame(frame);
                 if (res.status !== STATUS_OK)
                     throw new Error(res.message);
                 return new Tx(this, conn);
@@ -388,82 +419,68 @@ export class LunaDBClient {
         });
     }
     collectionCreate(col) {
-        return this.execute(CMD_COLLECTION_CREATE, writeString(col), r => r.message);
+        return this.execute(buildFrame(CMD_COLLECTION_CREATE, col), (r) => ({
+            Message: r.message,
+        }));
     }
     collectionDelete(col) {
-        return this.execute(CMD_COLLECTION_DELETE, writeString(col), r => r.message);
+        return this.execute(buildFrame(CMD_COLLECTION_DELETE, col), (r) => ({
+            Message: r.message,
+        }));
     }
     collectionList() {
-        return this.execute(CMD_COLLECTION_LIST, Buffer.alloc(0), r => {
-            return BSON.deserialize(r.data).list;
-        });
+        return this.execute(Buffer.from([CMD_COLLECTION_LIST]), (r) => BSON.deserialize(r.data).list);
     }
     collectionIndexCreate(col, field) {
-        return this.execute(CMD_COLLECTION_INDEX_CREATE, Buffer.concat([writeString(col), writeString(field)]), r => r.message);
+        return this.execute(buildFrame(CMD_COLLECTION_INDEX_CREATE, col, field), (r) => ({ Message: r.message }));
     }
+    // ¡Aquí está la función que faltaba!
     collectionIndexDelete(col, field) {
-        return this.execute(CMD_COLLECTION_INDEX_DELETE, Buffer.concat([writeString(col), writeString(field)]), r => r.message);
+        return this.execute(buildFrame(CMD_COLLECTION_INDEX_DELETE, col, field), (r) => ({ Message: r.message }));
     }
     collectionIndexList(col) {
-        return this.execute(CMD_COLLECTION_INDEX_LIST, writeString(col), r => {
-            return BSON.deserialize(r.data).list;
-        });
+        return this.execute(buildFrame(CMD_COLLECTION_INDEX_LIST, col), (r) => BSON.deserialize(r.data).list);
     }
     collectionItemSet(col, value, key = "") {
-        const payload = Buffer.concat([
-            writeString(col),
-            writeString(key),
-            writeBytes(BSON.serialize(value))
-        ]);
-        return this.execute(CMD_COLLECTION_ITEM_SET, payload, r => BSON.deserialize(r.data));
+        const frame = buildFrame(CMD_COLLECTION_ITEM_SET, col, key, BSON.serialize(value));
+        return this.execute(frame, (r) => BSON.deserialize(r.data));
     }
     collectionItemSetMany(col, items) {
-        const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-        return this.execute(CMD_COLLECTION_ITEM_SET_MANY, payload, r => r.message);
+        const frame = buildFrame(CMD_COLLECTION_ITEM_SET_MANY, col, BSON.serialize({ array: items }));
+        return this.execute(frame, (r) => ({ Message: r.message }));
     }
     collectionItemUpdate(col, key, patch) {
-        const payload = Buffer.concat([writeString(col), writeString(key), writeBytes(BSON.serialize(patch))]);
-        return this.execute(CMD_COLLECTION_ITEM_UPDATE, payload, r => r.message);
-    }
-    collectionItemUpdateMany(col, items) {
-        const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-        return this.execute(CMD_COLLECTION_ITEM_UPDATE_MANY, payload, r => r.message);
+        const frame = buildFrame(CMD_COLLECTION_ITEM_UPDATE, col, key, BSON.serialize(patch));
+        return this.execute(frame, (r) => ({ Message: r.message }));
     }
     collectionItemDelete(col, key) {
-        return this.execute(CMD_COLLECTION_ITEM_DELETE, Buffer.concat([writeString(col), writeString(key)]), r => r.message);
+        return this.execute(buildFrame(CMD_COLLECTION_ITEM_DELETE, col, key), (r) => ({ Message: r.message }));
     }
     collectionItemDeleteMany(col, keys) {
-        const keysCountBuffer = Buffer.alloc(4);
-        keysCountBuffer.writeUInt32LE(keys.length, 0);
-        const keysPayload = keys.map(k => writeString(k));
-        const payload = Buffer.concat([writeString(col), keysCountBuffer, ...keysPayload]);
-        return this.execute(CMD_COLLECTION_ITEM_DELETE_MANY, payload, r => r.message);
+        return this.execute(buildFrame(CMD_COLLECTION_ITEM_DELETE_MANY, col, keys), (r) => ({ Message: r.message }));
     }
     collectionItemGet(col, key) {
-        return this.execute(CMD_COLLECTION_ITEM_GET, Buffer.concat([writeString(col), writeString(key)]), r => {
+        return this.execute(buildFrame(CMD_COLLECTION_ITEM_GET, col, key), (r) => {
             if (r.status === STATUS_NOT_FOUND)
                 return { found: false, message: r.message, value: null };
-            return { found: true, message: r.message, value: BSON.deserialize(r.data) };
+            return {
+                found: true,
+                message: r.message,
+                value: BSON.deserialize(r.data),
+            };
         });
     }
     collectionQuery(col, query) {
-        const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize(query))]);
-        return this.execute(CMD_COLLECTION_QUERY, payload, r => BSON.deserialize(r.data).results);
+        const frame = buildFrame(CMD_COLLECTION_QUERY, col, BSON.serialize(query));
+        return this.execute(frame, (r) => BSON.deserialize(r.data).results);
     }
     collectionUpdateWhere(col, query, patch) {
-        const payload = Buffer.concat([
-            writeString(col),
-            writeBytes(BSON.serialize(query)),
-            writeBytes(BSON.serialize(patch))
-        ]);
-        return this.execute(CMD_COLLECTION_UPDATE_WHERE, payload, r => r.message);
+        const frame = buildFrame(CMD_COLLECTION_UPDATE_WHERE, col, BSON.serialize(query), BSON.serialize(patch));
+        return this.execute(frame, (r) => ({ Message: r.message }));
     }
     collectionDeleteWhere(col, query) {
-        const payload = Buffer.concat([
-            writeString(col),
-            writeBytes(BSON.serialize(query))
-        ]);
-        return this.execute(CMD_COLLECTION_DELETE_WHERE, payload, r => r.message);
+        const frame = buildFrame(CMD_COLLECTION_DELETE_WHERE, col, BSON.serialize(query));
+        return this.execute(frame, (r) => ({ Message: r.message }));
     }
 }
 export default LunaDBClient;

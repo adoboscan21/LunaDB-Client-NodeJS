@@ -4,7 +4,6 @@ import { Buffer } from "node:buffer";
 import { BSON } from "bson";
 
 // --- Protocol Constants ---
-// Collection Management Commands
 const CMD_COLLECTION_CREATE = 1;
 const CMD_COLLECTION_DELETE = 2;
 const CMD_COLLECTION_LIST = 3;
@@ -12,7 +11,6 @@ const CMD_COLLECTION_INDEX_CREATE = 4;
 const CMD_COLLECTION_INDEX_DELETE = 5;
 const CMD_COLLECTION_INDEX_LIST = 6;
 
-// Collection Item Commands
 const CMD_COLLECTION_ITEM_SET = 7;
 const CMD_COLLECTION_ITEM_SET_MANY = 8;
 const CMD_COLLECTION_ITEM_GET = 9;
@@ -24,15 +22,11 @@ const CMD_COLLECTION_ITEM_UPDATE_MANY = 15;
 const CMD_COLLECTION_UPDATE_WHERE = 16;
 const CMD_COLLECTION_DELETE_WHERE = 17;
 
-// Authentication Commands
 const CMD_AUTHENTICATE = 18;
-
-// Transaction Commands
 const CMD_BEGIN = 25;
 const CMD_COMMIT = 26;
 const CMD_ROLLBACK = 27;
 
-// --- Status Codes ---
 const STATUS_OK = 1;
 const STATUS_NOT_FOUND = 2;
 
@@ -48,7 +42,7 @@ function getStatusString(status: number): string {
   return statuses[status] || "UNKNOWN_STATUS";
 }
 
-interface CommandResponse {
+export interface CommandResponse {
   status: number;
   message: string;
   data: Buffer;
@@ -58,6 +52,10 @@ export interface GetResult<T = any> {
   found: boolean;
   message: string;
   value: T | null;
+}
+
+export interface MutationResult {
+  Message: string;
 }
 
 export interface Query {
@@ -74,47 +72,109 @@ export interface Query {
   lookups?: any[];
 }
 
-function writeString(str: string): Buffer {
-  const strBuffer = Buffer.from(str, "utf8");
-  const lenBuffer = Buffer.alloc(4);
-  lenBuffer.writeUInt32LE(strBuffer.length, 0);
-  return Buffer.concat([lenBuffer, strBuffer]);
-}
+// 🚀 HIGH PERFORMANCE ZERO-COPY FRAME BUILDER
+// Soporta Uint8Array (BSON) nativo y lo convierte a Node Buffer sin duplicar memoria
+function buildFrame(
+  cmd: number,
+  ...args: (string | Uint8Array | string[])[]
+): Buffer {
+  let size = 1; // 1 byte para el comando
+  const parsedArgs = args.map((arg) => {
+    if (typeof arg === "string") {
+      const b = Buffer.from(arg, "utf8");
+      size += 4 + b.length;
+      return { type: "buf", data: b };
+    } else if (arg instanceof Uint8Array) {
+      // ZERO-COPY CAST: Usamos el buffer de memoria subyacente directamente
+      const b = Buffer.isBuffer(arg)
+        ? arg
+        : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength);
+      size += 4 + b.length;
+      return { type: "buf", data: b };
+    } else if (Array.isArray(arg)) {
+      size += 4; // 4 bytes para la cantidad de llaves
+      const bufs = arg.map((s) => Buffer.from(s, "utf8"));
+      for (const b of bufs) size += 4 + b.length;
+      return { type: "arr", data: bufs };
+    }
+    throw new Error("Invalid argument type for frame builder");
+  });
 
-function writeBytes(bytes: Buffer | Uint8Array): Buffer {
-  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-  const lenBuffer = Buffer.alloc(4);
-  lenBuffer.writeUInt32LE(buf.length, 0);
-  return Buffer.concat([lenBuffer, buf]);
+  const buf = Buffer.allocUnsafe(size);
+  let offset = 0;
+  buf.writeUInt8(cmd, offset++);
+
+  for (const arg of parsedArgs) {
+    if (arg.type === "buf") {
+      const b = arg.data as Buffer;
+      buf.writeUInt32LE(b.length, offset);
+      offset += 4;
+      b.copy(buf, offset);
+      offset += b.length;
+    } else if (arg.type === "arr") {
+      const arr = arg.data as Buffer[];
+      buf.writeUInt32LE(arr.length, offset);
+      offset += 4;
+      for (const b of arr) {
+        buf.writeUInt32LE(b.length, offset);
+        offset += 4;
+        b.copy(buf, offset);
+        offset += b.length;
+      }
+    }
+  }
+  return buf;
 }
 
 // --- Internal Connection Wrapper ---
 class LunaDBConnection {
   public socket: tls.TLSSocket | null = null;
-  public isClosed: boolean = false; // Tracks socket health
-  private responseBuffer = Buffer.alloc(0);
+  public isClosed: boolean = false;
+  private responseBuffer = Buffer.allocUnsafe(0);
   private responseWaiter: ((value: CommandResponse) => void) | null = null;
   private errorWaiter: ((err: Error) => void) | null = null;
 
-  public connect(host: string, port: number, user?: string | null, pass?: string | null, cert?: string | null, rejectAuth = true): Promise<void> {
+  public connect(
+    host: string,
+    port: number,
+    user?: string | null,
+    pass?: string | null,
+    cert?: string | null,
+    rejectAuth = true,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const options: tls.ConnectionOptions = { host, port, rejectUnauthorized: rejectAuth };
+      const options: tls.ConnectionOptions = {
+        host,
+        port,
+        rejectUnauthorized: rejectAuth,
+      };
       if (cert) options.ca = [fs.readFileSync(cert)];
 
       this.socket = tls.connect(options, async () => {
         this.socket!.on("data", (chunk) => {
-          this.responseBuffer = Buffer.concat([this.responseBuffer, chunk]);
+          if (this.responseBuffer.length === 0) {
+            this.responseBuffer = chunk;
+          } else {
+            this.responseBuffer = Buffer.concat([this.responseBuffer, chunk]);
+          }
           this.tryProcessResponse();
         });
 
-        this.socket!.on("close", () => { this.isClosed = true; this.triggerError(new Error("Socket closed by remote peer")); });
-        this.socket!.on("error", (err) => { this.isClosed = true; this.triggerError(err); });
+        this.socket!.on("close", () => {
+          this.isClosed = true;
+          this.triggerError(new Error("Socket closed"));
+        });
+        this.socket!.on("error", (err) => {
+          this.isClosed = true;
+          this.triggerError(err);
+        });
 
         if (user && pass) {
           try {
-            const payload = Buffer.concat([writeString(user), writeString(pass)]);
-            const res = await this.sendCommand(CMD_AUTHENTICATE, payload);
-            if (res.status !== STATUS_OK) return reject(new Error(`Auth failed: ${res.message}`));
+            const frame = buildFrame(CMD_AUTHENTICATE, user, pass);
+            const res = await this.sendFrame(frame);
+            if (res.status !== STATUS_OK)
+              return reject(new Error(`Auth failed: ${res.message}`));
           } catch (e) {
             return reject(e);
           }
@@ -135,8 +195,8 @@ class LunaDBConnection {
 
   private tryProcessResponse(): void {
     if (!this.responseWaiter) return;
-    while (true) {
-      if (this.responseBuffer.length < 5) return;
+
+    while (this.responseBuffer.length >= 5) {
       const msgLen = this.responseBuffer.readUInt32LE(1);
       const reqForDataLen = 5 + msgLen + 4;
       if (this.responseBuffer.length < reqForDataLen) return;
@@ -146,8 +206,16 @@ class LunaDBConnection {
 
       const status = this.responseBuffer.readUInt8(0);
       const message = this.responseBuffer.toString("utf8", 5, 5 + msgLen);
-      const data = this.responseBuffer.subarray(reqForDataLen, totalLen);
-      this.responseBuffer = this.responseBuffer.subarray(totalLen);
+
+      const data = Buffer.from(
+        this.responseBuffer.subarray(reqForDataLen, totalLen),
+      );
+
+      if (this.responseBuffer.length === totalLen) {
+        this.responseBuffer = Buffer.allocUnsafe(0);
+      } else {
+        this.responseBuffer = this.responseBuffer.subarray(totalLen);
+      }
 
       const waiter = this.responseWaiter;
       this.responseWaiter = null;
@@ -157,14 +225,12 @@ class LunaDBConnection {
     }
   }
 
-  public async sendCommand(cmd: number, payload: Buffer): Promise<CommandResponse> {
-    if (this.isClosed) throw new Error("Cannot send command: Connection is dead");
-
+  public async sendFrame(frame: Buffer): Promise<CommandResponse> {
+    if (this.isClosed) throw new Error("Connection is dead");
     return new Promise((resolve, reject) => {
       this.responseWaiter = resolve;
       this.errorWaiter = reject;
-
-      this.socket!.write(Buffer.concat([Buffer.from([cmd]), payload]), (err) => {
+      this.socket!.write(frame, (err) => {
         if (err) {
           this.isClosed = true;
           this.triggerError(err);
@@ -183,105 +249,153 @@ class LunaDBConnection {
 export class Tx {
   private closed = false;
 
-  constructor(private client: LunaDBClient, private conn: LunaDBConnection) { }
+  constructor(
+    private client: LunaDBClient,
+    private conn: LunaDBConnection,
+  ) {}
 
-  private async execute(cmd: number, payload: Buffer): Promise<CommandResponse> {
+  private async execute(frame: Buffer): Promise<CommandResponse> {
     if (this.closed) throw new Error("Transaction is already closed");
     try {
-      const res = await this.conn.sendCommand(cmd, payload);
+      const res = await this.conn.sendFrame(frame);
       if (res.status !== STATUS_OK) throw new Error(res.message);
       return res;
     } catch (err) {
       this.closed = true;
-      this.client.release(this.conn); // Release on error (server will auto-rollback dead connections)
+      this.client.release(this.conn);
       throw err;
     }
   }
 
-  public async collectionItemSet(col: string, value: any, key: string = ""): Promise<string> {
-    const payload = Buffer.concat([
-      writeString(col),
-      writeString(key),
-      writeBytes(BSON.serialize(value))
-    ]);
-    const res = await this.execute(CMD_COLLECTION_ITEM_SET, payload);
-    return res.message;
+  public async collectionItemSet(
+    col: string,
+    value: any,
+    key: string = "",
+  ): Promise<MutationResult> {
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_SET,
+      col,
+      key,
+      BSON.serialize(value),
+    );
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionItemSetMany(col: string, items: any[]): Promise<string> {
-    const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-    const res = await this.execute(CMD_COLLECTION_ITEM_SET_MANY, payload);
-    return res.message;
+  public async collectionItemSetMany(
+    col: string,
+    items: any[],
+  ): Promise<MutationResult> {
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_SET_MANY,
+      col,
+      BSON.serialize({ array: items }),
+    );
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionItemUpdate(col: string, key: string, patch: any): Promise<string> {
-    const payload = Buffer.concat([writeString(col), writeString(key), writeBytes(BSON.serialize(patch))]);
-    const res = await this.execute(CMD_COLLECTION_ITEM_UPDATE, payload);
-    return res.message;
+  public async collectionItemUpdate(
+    col: string,
+    key: string,
+    patch: any,
+  ): Promise<MutationResult> {
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_UPDATE,
+      col,
+      key,
+      BSON.serialize(patch),
+    );
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionItemUpdateMany(col: string, items: any[]): Promise<string> {
-    const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-    const res = await this.execute(CMD_COLLECTION_ITEM_UPDATE_MANY, payload);
-    return res.message;
+  public async collectionItemUpdateMany(
+    col: string,
+    items: any[],
+  ): Promise<MutationResult> {
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_UPDATE_MANY,
+      col,
+      BSON.serialize({ array: items }),
+    );
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionItemDelete(col: string, key: string): Promise<string> {
-    const payload = Buffer.concat([writeString(col), writeString(key)]);
-    const res = await this.execute(CMD_COLLECTION_ITEM_DELETE, payload);
-    return res.message;
+  public async collectionItemDelete(
+    col: string,
+    key: string,
+  ): Promise<MutationResult> {
+    const frame = buildFrame(CMD_COLLECTION_ITEM_DELETE, col, key);
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionItemDeleteMany(col: string, keys: string[]): Promise<string> {
-    const keysCountBuffer = Buffer.alloc(4);
-    keysCountBuffer.writeUInt32LE(keys.length, 0);
-    const keysPayload = keys.map(k => writeString(k));
-    const payload = Buffer.concat([writeString(col), keysCountBuffer, ...keysPayload]);
-    const res = await this.execute(CMD_COLLECTION_ITEM_DELETE_MANY, payload);
-    return res.message;
+  public async collectionItemDeleteMany(
+    col: string,
+    keys: string[],
+  ): Promise<MutationResult> {
+    const frame = buildFrame(CMD_COLLECTION_ITEM_DELETE_MANY, col, keys);
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionUpdateWhere(col: string, query: Query, patch: any): Promise<string> {
-    const payload = Buffer.concat([
-      writeString(col),
-      writeBytes(BSON.serialize(query)),
-      writeBytes(BSON.serialize(patch))
-    ]);
-    const res = await this.execute(CMD_COLLECTION_UPDATE_WHERE, payload);
-    return res.message;
+  public async collectionUpdateWhere(
+    col: string,
+    query: Query,
+    patch: any,
+  ): Promise<MutationResult> {
+    const frame = buildFrame(
+      CMD_COLLECTION_UPDATE_WHERE,
+      col,
+      BSON.serialize(query),
+      BSON.serialize(patch),
+    );
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async collectionDeleteWhere(col: string, query: Query): Promise<string> {
-    const payload = Buffer.concat([
-      writeString(col),
-      writeBytes(BSON.serialize(query))
-    ]);
-    const res = await this.execute(CMD_COLLECTION_DELETE_WHERE, payload);
-    return res.message;
+  public async collectionDeleteWhere(
+    col: string,
+    query: Query,
+  ): Promise<MutationResult> {
+    const frame = buildFrame(
+      CMD_COLLECTION_DELETE_WHERE,
+      col,
+      BSON.serialize(query),
+    );
+    const res = await this.execute(frame);
+    return { Message: res.message };
   }
 
-  public async rollback(): Promise<string> {
-    if (this.closed) return "Already closed";
-    const res = await this.conn.sendCommand(CMD_ROLLBACK, Buffer.alloc(0));
+  public async rollback(): Promise<MutationResult> {
+    if (this.closed) return { Message: "Already closed" };
+    const frame = Buffer.from([CMD_ROLLBACK]);
+    const res = await this.conn.sendFrame(frame);
     this.closed = true;
     this.client.release(this.conn);
-    return res.message;
+    return { Message: res.message };
   }
 
-  public async commit(): Promise<string> {
+  public async commit(): Promise<MutationResult> {
     if (this.closed) throw new Error("Transaction is already closed");
-    const res = await this.conn.sendCommand(CMD_COMMIT, Buffer.alloc(0));
+    const frame = Buffer.from([CMD_COMMIT]);
+    const res = await this.conn.sendFrame(frame);
     this.closed = true;
     this.client.release(this.conn);
     if (res.status !== STATUS_OK) throw new Error(res.message);
-    return res.message;
+    return { Message: res.message };
   }
 }
 
 // --- Main Client (Connection Pool Manager) ---
 export class LunaDBClient {
   private pool: LunaDBConnection[] = [];
-  private waiters: { resolve: (conn: LunaDBConnection) => void, reject: (err: Error) => void }[] = [];
+  private waiters: {
+    resolve: (conn: LunaDBConnection) => void;
+    reject: (err: Error) => void;
+  }[] = [];
   private activeConnections: number = 0;
 
   constructor(
@@ -291,19 +405,10 @@ export class LunaDBClient {
     private password?: string,
     private serverCertPath?: string,
     private rejectUnauthorized: boolean = true,
-    private poolSize: number = 10 // Sensible default
-  ) { }
-
-  public get isAuthenticatedSession(): boolean {
-    return !!this.username;
-  }
-
-  public get authenticatedUser(): string | null {
-    return this.username || null;
-  }
+    private poolSize: number = 100,
+  ) {}
 
   public async connect(): Promise<void> {
-    // Lazy Loading: Test connection to ensure credentials/network are valid
     const testConn = await this.acquire();
     this.release(testConn);
   }
@@ -312,30 +417,31 @@ export class LunaDBClient {
     for (const conn of this.pool) conn.close();
     this.pool = [];
     this.activeConnections = 0;
-    for (const waiter of this.waiters) waiter.reject(new Error("Client closed manually"));
+    for (const waiter of this.waiters)
+      waiter.reject(new Error("Client closed"));
     this.waiters = [];
   }
 
   private async acquire(): Promise<LunaDBConnection> {
-    // Clean dead connections
-    this.pool = this.pool.filter(c => !c.isClosed);
-
-    if (this.pool.length > 0) {
-      return this.pool.pop()!;
-    }
+    this.pool = this.pool.filter((c) => !c.isClosed);
+    if (this.pool.length > 0) return this.pool.pop()!;
 
     if (this.activeConnections < this.poolSize) {
       this.activeConnections++;
       const conn = new LunaDBConnection();
       try {
-        await conn.connect(this.host, this.port, this.username, this.password, this.serverCertPath, this.rejectUnauthorized);
-
-        // Auto-heal logic
+        await conn.connect(
+          this.host,
+          this.port,
+          this.username,
+          this.password,
+          this.serverCertPath,
+          this.rejectUnauthorized,
+        );
         conn.socket!.once("close", () => {
           this.activeConnections--;
-          this.pool = this.pool.filter(c => c !== conn);
+          this.pool = this.pool.filter((c) => c !== conn);
         });
-
         return conn;
       } catch (err: any) {
         this.activeConnections--;
@@ -356,7 +462,6 @@ export class LunaDBClient {
       }
       return;
     }
-
     if (this.waiters.length > 0) {
       const waiter = this.waiters.shift()!;
       waiter.resolve(conn);
@@ -365,18 +470,21 @@ export class LunaDBClient {
     }
   }
 
-  private async execute<T>(cmd: number, payload: Buffer, parser: (res: CommandResponse) => T): Promise<T> {
+  private async execute<T>(
+    frame: Buffer,
+    parser: (res: CommandResponse) => T,
+  ): Promise<T> {
     const conn = await this.acquire();
     try {
-      const res = await conn.sendCommand(cmd, payload);
+      const res = await conn.sendFrame(frame);
       if (res.status !== STATUS_OK && res.status !== STATUS_NOT_FOUND) {
         throw new Error(`${getStatusString(res.status)}: ${res.message}`);
       }
       this.release(conn);
       return parser(res);
     } catch (err) {
-      conn.close(); // Force kill on error to prevent protocol desync
-      this.release(conn); // Release will trigger self-healing
+      conn.close();
+      this.release(conn);
       throw err;
     }
   }
@@ -384,7 +492,8 @@ export class LunaDBClient {
   public async begin(): Promise<Tx> {
     const conn = await this.acquire();
     try {
-      const res = await conn.sendCommand(CMD_BEGIN, Buffer.alloc(0));
+      const frame = Buffer.from([CMD_BEGIN]);
+      const res = await conn.sendFrame(frame);
       if (res.status !== STATUS_OK) throw new Error(res.message);
       return new Tx(this, conn);
     } catch (err) {
@@ -395,96 +504,130 @@ export class LunaDBClient {
   }
 
   public collectionCreate(col: string) {
-    return this.execute(CMD_COLLECTION_CREATE, writeString(col), r => r.message);
+    return this.execute(buildFrame(CMD_COLLECTION_CREATE, col), (r) => ({
+      Message: r.message,
+    }));
   }
 
   public collectionDelete(col: string) {
-    return this.execute(CMD_COLLECTION_DELETE, writeString(col), r => r.message);
+    return this.execute(buildFrame(CMD_COLLECTION_DELETE, col), (r) => ({
+      Message: r.message,
+    }));
   }
 
   public collectionList(): Promise<string[]> {
-    return this.execute(CMD_COLLECTION_LIST, Buffer.alloc(0), r => {
-      return BSON.deserialize(r.data).list as string[];
-    });
+    return this.execute(
+      Buffer.from([CMD_COLLECTION_LIST]),
+      (r) => BSON.deserialize(r.data).list as string[],
+    );
   }
 
   public collectionIndexCreate(col: string, field: string) {
-    return this.execute(CMD_COLLECTION_INDEX_CREATE, Buffer.concat([writeString(col), writeString(field)]), r => r.message);
+    return this.execute(
+      buildFrame(CMD_COLLECTION_INDEX_CREATE, col, field),
+      (r) => ({ Message: r.message }),
+    );
   }
 
+  // ¡Aquí está la función que faltaba!
   public collectionIndexDelete(col: string, field: string) {
-    return this.execute(CMD_COLLECTION_INDEX_DELETE, Buffer.concat([writeString(col), writeString(field)]), r => r.message);
+    return this.execute(
+      buildFrame(CMD_COLLECTION_INDEX_DELETE, col, field),
+      (r) => ({ Message: r.message }),
+    );
   }
 
   public collectionIndexList(col: string): Promise<string[]> {
-    return this.execute(CMD_COLLECTION_INDEX_LIST, writeString(col), r => {
-      return BSON.deserialize(r.data).list as string[];
-    });
+    return this.execute(
+      buildFrame(CMD_COLLECTION_INDEX_LIST, col),
+      (r) => BSON.deserialize(r.data).list as string[],
+    );
   }
 
-  public collectionItemSet<T = any>(col: string, value: T, key: string = ""): Promise<T> {
-    const payload = Buffer.concat([
-      writeString(col),
-      writeString(key),
-      writeBytes(BSON.serialize(value as any))
-    ]);
-    return this.execute(CMD_COLLECTION_ITEM_SET, payload, r => BSON.deserialize(r.data) as T);
+  public collectionItemSet<T = any>(
+    col: string,
+    value: T,
+    key: string = "",
+  ): Promise<T> {
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_SET,
+      col,
+      key,
+      BSON.serialize(value as any),
+    );
+    return this.execute(frame, (r) => BSON.deserialize(r.data) as T);
   }
 
   public collectionItemSetMany(col: string, items: any[]) {
-    const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-    return this.execute(CMD_COLLECTION_ITEM_SET_MANY, payload, r => r.message);
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_SET_MANY,
+      col,
+      BSON.serialize({ array: items }),
+    );
+    return this.execute(frame, (r) => ({ Message: r.message }));
   }
 
   public collectionItemUpdate(col: string, key: string, patch: any) {
-    const payload = Buffer.concat([writeString(col), writeString(key), writeBytes(BSON.serialize(patch))]);
-    return this.execute(CMD_COLLECTION_ITEM_UPDATE, payload, r => r.message);
-  }
-
-  public collectionItemUpdateMany(col: string, items: any[]) {
-    const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize({ array: items }))]);
-    return this.execute(CMD_COLLECTION_ITEM_UPDATE_MANY, payload, r => r.message);
+    const frame = buildFrame(
+      CMD_COLLECTION_ITEM_UPDATE,
+      col,
+      key,
+      BSON.serialize(patch),
+    );
+    return this.execute(frame, (r) => ({ Message: r.message }));
   }
 
   public collectionItemDelete(col: string, key: string) {
-    return this.execute(CMD_COLLECTION_ITEM_DELETE, Buffer.concat([writeString(col), writeString(key)]), r => r.message);
+    return this.execute(
+      buildFrame(CMD_COLLECTION_ITEM_DELETE, col, key),
+      (r) => ({ Message: r.message }),
+    );
   }
 
   public collectionItemDeleteMany(col: string, keys: string[]) {
-    const keysCountBuffer = Buffer.alloc(4);
-    keysCountBuffer.writeUInt32LE(keys.length, 0);
-    const keysPayload = keys.map(k => writeString(k));
-    const payload = Buffer.concat([writeString(col), keysCountBuffer, ...keysPayload]);
-    return this.execute(CMD_COLLECTION_ITEM_DELETE_MANY, payload, r => r.message);
+    return this.execute(
+      buildFrame(CMD_COLLECTION_ITEM_DELETE_MANY, col, keys),
+      (r) => ({ Message: r.message }),
+    );
   }
 
-  public collectionItemGet<T = any>(col: string, key: string): Promise<GetResult<T>> {
-    return this.execute(CMD_COLLECTION_ITEM_GET, Buffer.concat([writeString(col), writeString(key)]), r => {
-      if (r.status === STATUS_NOT_FOUND) return { found: false, message: r.message, value: null };
-      return { found: true, message: r.message, value: BSON.deserialize(r.data) as T };
+  public collectionItemGet<T = any>(
+    col: string,
+    key: string,
+  ): Promise<GetResult<T>> {
+    return this.execute(buildFrame(CMD_COLLECTION_ITEM_GET, col, key), (r) => {
+      if (r.status === STATUS_NOT_FOUND)
+        return { found: false, message: r.message, value: null };
+      return {
+        found: true,
+        message: r.message,
+        value: BSON.deserialize(r.data) as T,
+      };
     });
   }
 
   public collectionQuery<T = any>(col: string, query: Query): Promise<T> {
-    const payload = Buffer.concat([writeString(col), writeBytes(BSON.serialize(query))]);
-    return this.execute(CMD_COLLECTION_QUERY, payload, r => BSON.deserialize(r.data).results as T);
+    const frame = buildFrame(CMD_COLLECTION_QUERY, col, BSON.serialize(query));
+    return this.execute(frame, (r) => BSON.deserialize(r.data).results as T);
   }
 
   public collectionUpdateWhere(col: string, query: Query, patch: any) {
-    const payload = Buffer.concat([
-      writeString(col),
-      writeBytes(BSON.serialize(query)),
-      writeBytes(BSON.serialize(patch))
-    ]);
-    return this.execute(CMD_COLLECTION_UPDATE_WHERE, payload, r => r.message);
+    const frame = buildFrame(
+      CMD_COLLECTION_UPDATE_WHERE,
+      col,
+      BSON.serialize(query),
+      BSON.serialize(patch),
+    );
+    return this.execute(frame, (r) => ({ Message: r.message }));
   }
 
   public collectionDeleteWhere(col: string, query: Query) {
-    const payload = Buffer.concat([
-      writeString(col),
-      writeBytes(BSON.serialize(query))
-    ]);
-    return this.execute(CMD_COLLECTION_DELETE_WHERE, payload, r => r.message);
+    const frame = buildFrame(
+      CMD_COLLECTION_DELETE_WHERE,
+      col,
+      BSON.serialize(query),
+    );
+    return this.execute(frame, (r) => ({ Message: r.message }));
   }
 }
 
